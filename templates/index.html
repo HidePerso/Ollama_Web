@@ -615,6 +615,14 @@
                     <input type="text" id="pullModelName" placeholder="Enter model name (e.g., llama2, mistral)">
                     <button onclick="pullModel()">Pull</button>
                 </div>
+                <div style="display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap;">
+                    <a href="https://ollama.com/library" target="_blank" style="text-decoration: none;">
+                        <button class="small" style="white-space: nowrap;">🦙 Ollama Library</button>
+                    </a>
+                    <a href="https://huggingface.co/models?library=gguf&sort=trending" target="_blank" style="text-decoration: none;">
+                        <button class="small" style="white-space: nowrap;">🤗 HuggingFace GGUF</button>
+                    </a>
+                </div>
                 <div id="pullProgress" class="progress-container"></div>
             </div>
         </div>
