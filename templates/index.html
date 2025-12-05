@@ -1052,8 +1052,12 @@
             
             // Add assistant message container
             const assistantMsgId = 'assistant-msg-' + Date.now();
+            const thinkingMsgId = 'thinking-msg-' + Date.now();
             messagesContainer.innerHTML += `
                 <div class="chat-message assistant" id="${assistantMsgId}">
+                    <div id="${thinkingMsgId}" style="display: none; padding: 8px; margin-bottom: 8px; background: rgba(129, 140, 248, 0.1); border-left: 3px solid #818cf8; border-radius: 4px; font-style: italic; color: #a5b4fc;">
+                        <strong>💭 Thinking:</strong> <span id="${thinkingMsgId}-text"></span>
+                    </div>
                     <div class="loading"></div>
                 </div>
             `;
@@ -1069,6 +1073,8 @@
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let accumulatedText = '';
+                let accumulatedThinking = '';
+                let hasThinking = false;
                 
                 function readStream() {
                     reader.read().then(({done, value}) => {
@@ -1096,9 +1102,38 @@
                                         return;
                                     }
                                     
+                                    if (data.thinking) {
+                                        hasThinking = true;
+                                        accumulatedThinking += data.thinking;
+                                        const thinkingDiv = document.getElementById(thinkingMsgId);
+                                        const thinkingText = document.getElementById(`${thinkingMsgId}-text`);
+                                        if (thinkingDiv && thinkingText) {
+                                            thinkingDiv.style.display = 'block';
+                                            thinkingText.textContent = accumulatedThinking;
+                                        }
+                                        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                                    }
+                                    
                                     if (data.response) {
+                                        // Remove loading indicator on first response
+                                        const loadingDiv = document.querySelector(`#${assistantMsgId} .loading`);
+                                        if (loadingDiv) loadingDiv.remove();
+                                        
                                         accumulatedText += data.response;
-                                        document.getElementById(assistantMsgId).textContent = accumulatedText;
+                                        const msgContent = document.getElementById(assistantMsgId);
+                                        
+                                        if (hasThinking) {
+                                            // Preserve thinking section and update response
+                                            const thinkingDiv = document.getElementById(thinkingMsgId);
+                                            msgContent.innerHTML = '';
+                                            if (thinkingDiv) msgContent.appendChild(thinkingDiv);
+                                            const responseSpan = document.createElement('span');
+                                            responseSpan.textContent = accumulatedText;
+                                            msgContent.appendChild(responseSpan);
+                                        } else {
+                                            msgContent.textContent = accumulatedText;
+                                        }
+                                        
                                         messagesContainer.scrollTop = messagesContainer.scrollHeight;
                                     }
                                     
