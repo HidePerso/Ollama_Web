@@ -651,9 +651,12 @@
         
         <!-- Chat Interface -->
         <div class="card">
-            <h2>💬 Chat with Model</h2>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2 style="margin: 0;">💬 Chat with Model</h2>
+                <button onclick="clearChat()" style="padding: 8px 16px; background: rgba(231, 76, 60, 0.2); color: #e74c3c; border: 1px solid #e74c3c; border-radius: 6px; cursor: pointer; font-size: 0.9em;">🗑️ Clear Context</button>
+            </div>
             <div style="margin-bottom: 15px;">
-                <select id="chatModel" style="width: 100%;">
+                <select id="chatModel" style="width: 100%;" onchange="handleModelChange()">
                     <option value="">Select a model...</option>
                 </select>
             </div>
@@ -1028,6 +1031,22 @@
 
         
         let currentEventSource = null;
+        let conversationHistory = [];  // Store conversation context
+        
+        function clearChat() {
+            conversationHistory = [];
+            const messagesContainer = document.getElementById('chatMessages');
+            messagesContainer.innerHTML = '<div class="empty-state"><p>Context cleared! Start a new conversation.</p></div>';
+            showNotification('Chat context cleared', 'success');
+        }
+        
+        function handleModelChange() {
+            // Keep conversation history when switching models
+            const model = document.getElementById('chatModel').value;
+            if (model && conversationHistory.length > 0) {
+                showNotification('Model switched - keeping conversation context', 'success');
+            }
+        }
         
         function sendChat() {
             const model = document.getElementById('chatModel').value;
@@ -1078,7 +1097,11 @@
             fetch('/api/chat', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({model, message})
+                body: JSON.stringify({
+                    model, 
+                    message,
+                    context: conversationHistory  // Send conversation history
+                })
             })
             .then(response => {
                 const reader = response.body.getReader();
@@ -1152,6 +1175,19 @@
                                         input.disabled = false;
                                         sendButton.disabled = false;
                                         stopButton.classList.add('hidden');
+                                        
+                                        // Add messages to conversation history
+                                        if (!data.stopped && accumulatedText) {
+                                            conversationHistory.push({
+                                                role: 'user',
+                                                content: message
+                                            });
+                                            conversationHistory.push({
+                                                role: 'assistant',
+                                                content: accumulatedText
+                                            });
+                                        }
+                                        
                                         if (data.stopped) {
                                             document.getElementById(assistantMsgId).innerHTML += 
                                                 '<br><em style="color: #95a5a6; font-size: 0.9em;">[Generation stopped]</em>';

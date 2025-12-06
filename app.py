@@ -389,6 +389,7 @@ def chat():
     data = request.json
     model = data.get('model')
     message = data.get('message')
+    context = data.get('context', [])  # Get conversation history
     
     if not model or not message:
         return jsonify({"success": False, "error": "Model and message required"})
@@ -396,11 +397,22 @@ def chat():
     def generate():
         active_generation["stop"] = False
         try:
+            # Build full prompt with conversation history
+            full_prompt = ""
+            for msg in context:
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+                if role == 'user':
+                    full_prompt += f"User: {content}\n"
+                elif role == 'assistant':
+                    full_prompt += f"Assistant: {content}\n"
+            full_prompt += f"User: {message}\nAssistant:"
+            
             response = requests.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={
                     "model": model,
-                    "prompt": message,
+                    "prompt": full_prompt,
                     "stream": True
                 },
                 stream=True,
