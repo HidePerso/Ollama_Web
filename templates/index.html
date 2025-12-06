@@ -587,6 +587,66 @@
                 font-size: 16px; /* Prevents zoom on iOS */
             }
         }
+        
+        /* System Stats Styling */
+        .system-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            padding: 5px 0;
+        }
+        
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            font-weight: 600;
+            color: #a5b4fc;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .stat-bar {
+            height: 20px;
+            background: rgba(30, 30, 46, 0.6);
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid rgba(129, 140, 248, 0.2);
+        }
+        
+        .stat-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #818cf8, #a78bfa);
+            border-radius: 10px;
+            transition: width 0.3s ease, background 0.3s ease;
+        }
+        
+        .stat-bar-fill.high {
+            background: linear-gradient(90deg, #f59e0b, #ef4444);
+        }
+        
+        .stat-bar-fill.medium {
+            background: linear-gradient(90deg, #10b981, #f59e0b);
+        }
+        
+        .stat-value {
+            font-size: 0.85em;
+            color: #e0e0e0;
+            font-family: 'Courier New', monospace;
+            text-align: center;
+        }
+        
+        @media (max-width: 640px) {
+            .system-stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 15px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -595,6 +655,40 @@
             <h1>🦙 Ollama Web Interface</h1>
             <p class="subtitle">Manage and interact with your Ollama models</p>
         </header>
+        
+        <!-- System Resource Monitor -->
+        <div class="card" style="margin-bottom: 20px;">
+            <div class="system-stats-grid">
+                <div class="stat-item">
+                    <div class="stat-label">💻 CPU</div>
+                    <div class="stat-bar">
+                        <div id="cpuBar" class="stat-bar-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="stat-value" id="cpuValue">0%</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">🧠 RAM</div>
+                    <div class="stat-bar">
+                        <div id="ramBar" class="stat-bar-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="stat-value" id="ramValue">0%</div>
+                </div>
+                <div class="stat-item" id="gpuStat">
+                    <div class="stat-label">🎮 GPU</div>
+                    <div class="stat-bar">
+                        <div id="gpuBar" class="stat-bar-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="stat-value" id="gpuValue">N/A</div>
+                </div>
+                <div class="stat-item" id="vramStat">
+                    <div class="stat-label">📊 VRAM</div>
+                    <div class="stat-bar">
+                        <div id="vramBar" class="stat-bar-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="stat-value" id="vramValue">N/A</div>
+                </div>
+            </div>
+        </div>
         
         <div class="grid">
             <!-- Running Models -->
@@ -687,6 +781,52 @@
             setTimeout(() => {
                 notification.classList.remove('show');
             }, 3000);
+        }
+        
+        function updateSystemStats() {
+            fetch('/api/system/stats')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        const stats = data.stats;
+                        
+                        // Update CPU
+                        updateStatBar('cpu', stats.cpu_percent, `${stats.cpu_percent.toFixed(1)}%`);
+                        
+                        // Update RAM
+                        updateStatBar('ram', stats.ram_percent, 
+                            `${stats.ram_percent.toFixed(1)}% (${stats.ram_used}/${stats.ram_total} GB)`);
+                        
+                        // Update GPU
+                        if (stats.gpu_available === false) {
+                            document.getElementById('gpuValue').textContent = 'N/A';
+                            document.getElementById('gpuBar').style.width = '0%';
+                            document.getElementById('vramValue').textContent = 'N/A';
+                            document.getElementById('vramBar').style.width = '0%';
+                        } else {
+                            updateStatBar('gpu', stats.gpu_percent, `${stats.gpu_percent.toFixed(1)}%`);
+                            updateStatBar('vram', stats.vram_percent, 
+                                `${stats.vram_percent.toFixed(1)}% (${stats.vram_used}/${stats.vram_total} GB)`);
+                        }
+                    }
+                })
+                .catch(err => console.error('Error loading system stats:', err));
+        }
+        
+        function updateStatBar(type, percent, text) {
+            const bar = document.getElementById(`${type}Bar`);
+            const value = document.getElementById(`${type}Value`);
+            
+            bar.style.width = `${Math.min(percent, 100)}%`;
+            value.textContent = text;
+            
+            // Color based on usage
+            bar.classList.remove('high', 'medium');
+            if (percent >= 80) {
+                bar.classList.add('high');
+            } else if (percent >= 50) {
+                bar.classList.add('medium');
+            }
         }
         
         function loadRunningModels() {
@@ -1239,11 +1379,13 @@
         // Auto-refresh running models and downloads
         setInterval(loadRunningModels, 5000);
         setInterval(loadAllDownloads, 1000);
+        setInterval(updateSystemStats, 2000);  // Update system stats every 2 seconds
         
         // Initial load
         loadRunningModels();
         loadAvailableModels();
         loadAllDownloads();
+        updateSystemStats();
     </script>
 </body>
 </html>

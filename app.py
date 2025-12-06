@@ -8,6 +8,14 @@ import time
 import requests
 import signal
 import os
+import psutil
+
+# Try to import GPUtil for GPU monitoring (optional)
+try:
+    import GPUtil
+    GPU_AVAILABLE = True
+except ImportError:
+    GPU_AVAILABLE = False
 
 app = Flask(__name__)
 
@@ -493,6 +501,49 @@ def start_ollama():
         
         time.sleep(2)
         return jsonify({"success": True, "message": "Ollama started"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+@app.route('/api/system/stats', methods=['GET'])
+def get_system_stats():
+    """Get system resource usage statistics"""
+    try:
+        stats = {}
+        
+        # CPU Usage
+        stats['cpu_percent'] = psutil.cpu_percent(interval=0.1)
+        
+        # RAM Usage
+        ram = psutil.virtual_memory()
+        stats['ram_percent'] = ram.percent
+        stats['ram_used'] = round(ram.used / (1024**3), 2)  # GB
+        stats['ram_total'] = round(ram.total / (1024**3), 2)  # GB
+        
+        # GPU Usage (if available)
+        if GPU_AVAILABLE:
+            try:
+                gpus = GPUtil.getGPUs()
+                if gpus:
+                    gpu = gpus[0]  # Use first GPU
+                    stats['gpu_percent'] = round(gpu.load * 100, 1)
+                    stats['vram_percent'] = round(gpu.memoryUtil * 100, 1)
+                    stats['vram_used'] = round(gpu.memoryUsed / 1024, 2)  # GB
+                    stats['vram_total'] = round(gpu.memoryTotal / 1024, 2)  # GB
+                    stats['gpu_name'] = gpu.name
+                else:
+                    stats['gpu_percent'] = 0
+                    stats['vram_percent'] = 0
+                    stats['gpu_available'] = False
+            except Exception as e:
+                stats['gpu_percent'] = 0
+                stats['vram_percent'] = 0
+                stats['gpu_available'] = False
+        else:
+            stats['gpu_percent'] = 0
+            stats['vram_percent'] = 0
+            stats['gpu_available'] = False
+        
+        return jsonify({"success": True, "stats": stats})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
