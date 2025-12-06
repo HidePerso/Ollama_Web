@@ -259,8 +259,12 @@
             height: 24px;
             background: rgba(15, 15, 35, 0.8);
             border-radius: 12px;
-            overflow: hidden;
+            overflow: visible;
             border: 1px solid rgba(129, 140, 248, 0.2);
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
         
         .progress-bar-fill {
@@ -273,6 +277,8 @@
             color: white;
             font-weight: 600;
             font-size: 0.85em;
+            min-width: fit-content;
+            padding: 0 8px;
         }
         
         .progress-message {
@@ -615,6 +621,9 @@
                     <input type="text" id="pullModelName" placeholder="Enter model name (e.g., llama2, mistral)">
                     <button onclick="pullModel()">Pull</button>
                 </div>
+                <div style="padding: 8px 0; font-size: 0.85em; color: #a5b4fc; font-style: italic;">
+                    💡 Tip: You can enter just the model name, or paste commands like <code style="background: rgba(129, 140, 248, 0.2); padding: 2px 6px; border-radius: 4px;">ollama run llama2</code> or <code style="background: rgba(129, 140, 248, 0.2); padding: 2px 6px; border-radius: 4px;">ollama pull mistral</code> — both will work!
+                </div>
                 <div style="display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap;">
                     <a href="https://ollama.com/library" target="_blank" style="text-decoration: none;">
                         <button class="small" style="white-space: nowrap;">🦙 Ollama Library</button>
@@ -745,8 +754,8 @@
                 return;
             }
             
-            // Remove "ollama run" prefix if present
-            modelName = modelName.replace(/^ollama\s+run\s+/i, '');
+            // Remove "ollama run" or "ollama pull" prefix if present
+            modelName = modelName.replace(/^ollama\s+(run|pull)\s+/i, '');
             
             fetch('/api/pull', {
                 method: 'POST',
@@ -795,7 +804,8 @@
                                     <button class="small danger" id="${progressId}-cancel" onclick="cancelDownload('${modelName}')">✕ Cancel</button>
                                 </div>
                                 <div class="progress-bar-bg">
-                                    <div id="${progressId}-bar" class="progress-bar-fill" style="width: 0%">0%</div>
+                                    <div id="${progressId}-bar" class="progress-bar-fill" style="width: 0%; position: absolute; left: 0; top: 0; height: 100%;"></div>
+                                    <span id="${progressId}-text" style="position: relative; z-index: 1; color: #e4e4e7; font-weight: 600; font-size: 0.85em; text-shadow: 0 1px 2px rgba(0,0,0,0.5);">0%</span>
                                 </div>
                                 <div id="${progressId}-msg" style="margin-top: 8px; font-family: monospace; font-size: 0.9em; color: #a1a1aa;">Starting...</div>
                             `;
@@ -808,10 +818,11 @@
                         const cancelBtn = document.getElementById(`${progressId}-cancel`);
                         const progressDiv = document.getElementById(progressId);
                         
-                        if (bar && msg && progressDiv) {
+                        const text = document.getElementById(`${progressId}-text`);
+                        if (bar && msg && progressDiv && text) {
                             const progress = data.progress || 0;
                             bar.style.width = `${progress}%`;
-                            bar.textContent = `${progress}%`;
+                            text.textContent = `${progress}%`;
                             msg.textContent = data.message || 'Processing...';
                             
                             if (data.status === 'complete') {
