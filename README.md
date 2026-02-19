@@ -1,168 +1,79 @@
 # Ollama Web Interface
 
-A modern web interface for managing and interacting with Ollama models on localhost.
+Local-first UI for running, inspecting, and managing Ollama models, plus a four-stage text-processing pipeline with per-role presets.
 
-## Features
-
-### 🎨 Modern Dark Theme UI
-
-- Sleek glassmorphism design with gradient accents
-- Fully responsive - optimized for desktop, tablet, and mobile
-- Touch-friendly controls with proper hit targets
-
-### 🔄 Model Management
-
-- **Monitor Running Models** - View all running models with resource usage
-- **Start/Kill Ollama** - Control the Ollama service directly from the UI
-
-### ⬇️ Smart Downloads
-
-- **Concurrent Downloads** - Download multiple models simultaneously
-- **Real-Time Progress** - Live progress bars with speed and size info (e.g., "943 MB/8.6 GB | 3.2 MB/s")
-- **Cancel Anytime** - Stop downloads mid-process
-- **Persistent Progress** - Downloads continue in background, visible to all users
-- **Auto-Cleanup** - Completed/failed downloads automatically removed
-
-### 🛠️ Per-Model Actions
-
-- **Info** - View detailed model information in modal
-- **Copy** - Duplicate models with new names
-- **Remove** - Delete models with confirmation
+## Tech Stack
+- Python 3.8+, Flask, Gradio UI
+- Ollama CLI (localhost:11434)
+- Pinokio launcher scripts (`install.json`, `start.js`) for 1-click setup
 
 ## Installation
+### Via Pinokio (recommended)
+1. Place repo at `C:\pinokio\api\Ollama_Z.git` (or your Pinokio API directory).
+2. In Pinokio, open the app → run `Install` (creates venv, installs `requirements.txt`).
+3. Click `Start` to launch the UI.
 
-### Via Pinokio (Recommended)
-
-1. Clone or place this repository in your Pinokio API directory: `C:\pinokio\api\Ollama_Z.git\`
-2. Open Pinokio and find "Ollama Web Interface" in your apps
-3. Click "Install" to set up the environment
-4. Click "Start" to launch the web interface
-
-### Manual Installation
-
-1. Ensure Python 3.8+ is installed
-2. Create a virtual environment:
-
-   ```bash
-   python -m venv venv
-   ```
-
-3. Activate the virtual environment:
-   - Windows: `venv\Scripts\activate`
-   - Linux/Mac: `source venv/bin/activate`
-4. Install dependencies:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Usage
-
-### Start the Server
-
-**Via Pinokio:** Click the "Start" button in Pinokio
-
-**Manually:**
-
+### Manual
 ```bash
+python -m venv venv
+# Windows
+venv\Scripts\activate
+# macOS/Linux
+source venv/bin/activate
+pip install -r requirements.txt
 python app.py
 ```
 
-The web interface will be available at: `http://localhost:11435`
+The UI runs at `http://127.0.0.1:11436` by default.
 
-### Prerequisites
+## Prerequisites
+- Ollama installed and reachable at `http://localhost:11434`.
+- Network access to download models you pull.
 
-- Ollama must be installed and running on `localhost:11434`
-- Download Ollama from: <https://ollama.ai>
+## Using the App
+### Dashboard
+- System monitors (GPU/CPU/RAM) update automatically.
 
-### Available Ollama Commands
+### Pipeline tab
+- Four roles: translator → extractor → structurer → validator.
+- Any role may be left empty; empty roles are skipped automatically.
+- Role content follows a Modelfile-like syntax:
+  - `FROM <model>` (optional; defaults to `qwen2.5:latest`)
+  - `SYSTEM ...` for the instruction text (can be plain line or triple-quoted block)
+  - `PARAMETER <key> <value>` lines append to Ollama options (e.g. temperature, top_p, repeat_penalty, num_ctx).
+    ```
+    FROM qwen2.5:8b
+    SYSTEM """Translate to English, keep formatting."""
+    PARAMETER temperature 0.05
+    PARAMETER top_p 0.85
+    PARAMETER repeat_penalty 1.1
+    PARAMETER num_ctx 4096
+    ```
+- Presets let you save/load role sets; editing a preset updates the stored template.
 
-The interface supports all major Ollama operations:
+### Models tab
+- Pull, cancel, refresh, inspect, copy, and delete Ollama models with live progress.
 
-- **serve** - Start ollama (if not already running)
-- **pull** - Download models from registry with progress tracking
-- **list** - View all installed models
-- **ps** - Monitor running models with resource info
-- **run** - Chat with models through the interface
-- **stop** - Stop running models
-- **cp** - Copy models
-- **rm** - Remove models
-- **show** - Display detailed model information
+### App Settings
+- Choose UI theme; restart/reload may be needed for some themes.
+
+## API Endpoints (backend)
+- `POST /api/start`, `POST /api/kill`, `POST /api/serve` – control Ollama service.
+- `GET /api/ps`, `GET /api/list` – running/installed models.
+- `POST /api/pull`, `GET /api/pull/all`, `GET /api/pull/progress/<model>`, `POST /api/pull/cancel` – downloads.
+- `POST /api/run`, `POST /api/chat`, `POST /api/chat/stop` – generation/chat.
+- `POST /api/show`, `POST /api/cp`, `POST /api/rm`, `POST /api/stop` – model metadata and lifecycle.
 
 ## Project Structure
-
 ```
-
-Ollama_Z.git/
-├── app.py              # Flask application
-├── templates/
-│   └── index.html      # Web interface
-├── requirements.txt    # Python dependencies
-├── pinokio.js         # Pinokio configuration
-├── install.json       # Pinokio install script
-├── start.js         # Pinokio start script
+app.py              # Flask/Gradio app
+templates/          # Gradio HTML assets
+requirements.txt    # Python deps
+install.json        # Pinokio install script (venv + pip install)
+start.js            # Pinokio start script (runs app.py, captures URL)
+pinokio.js          # Pinokio launcher UI config
+pipeline_presets.json / templates.json # Saved presets and role templates
 ```
-
-## API Endpoints
-
-### Model Management
-
-- `GET /api/ps` - List running models with resource info
-- `GET /api/list` - List all installed models
-- `POST /api/stop` - Stop a specific running model
-- `POST /api/rm` - Remove a model
-- `POST /api/cp` - Copy a model to new name
-- `POST /api/show` - Get detailed model information
-
-### Download Operations
-
-- `POST /api/pull` - Start downloading a model
-- `GET /api/pull/all` - Get all active download progress (real-time)
-- `GET /api/pull/progress/<model>` - Get specific model download progress
-- `POST /api/pull/cancel` - Cancel an active download
-
-### Chat Operations
-
-- `POST /api/chat` - Stream chat responses (Server-Sent Events)
-- `POST /api/chat/stop` - Stop active generation
-
-### Ollama Control
-
-- `POST /api/start` - Start Ollama service
-- `POST /api/kill` - Kill all Ollama processes
-- `POST /api/serve` - Start Ollama serve (deprecated, use /api/start)
-
-## Technical Details
-
-### Architecture
-
-- **Backend**: Flask with threading for concurrent operations
-- **Frontend**: Vanilla JavaScript (no build step required)
-- **Streaming**: Server-Sent Events (SSE) for chat responses
-- **Progress Tracking**: Global shared state with auto-cleanup
-- **Process Management**: Direct subprocess control for Ollama CLI
-
-### Configuration
-
-The server runs on `0.0.0.0:11435` by default and connects to Ollama at `localhost:11434`.
-
-To change these settings, edit `app.py`:
-
-```python
-OLLAMA_URL = "http://localhost:11434"
-app.run(host='0.0.0.0', port=11435)
-```
-
-### Browser Compatibility
-
-- Modern browsers with ES6+ support
-- ReadableStream API for streaming responses
-- CSS Grid and Flexbox for responsive layout
 
 ## License
-
 MIT
-
-## Credits
-
-Built for use with [Ollama](https://ollama.ai) and [Pinokio](https://pinokio.computer)

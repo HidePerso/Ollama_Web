@@ -26,7 +26,13 @@
   "SDXL": {
     "translator": "translator",
     "extractor": "extractor",
-    "structurer": "structurer",
+    "structurer": "SDXL structurer",
+    "validator": ""
+  },
+  "ZImage Anchor Expander": {
+    "translator": "translator",
+    "extractor": "ZImage Anchor Expander",
+    "structurer": "",
     "validator": ""
   }
 }

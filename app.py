@@ -313,15 +313,15 @@ def has_cyrillic(text: str) -> bool:
     letter_count = len(re.findall(r'[\w]', text, re.UNICODE))
     return (cyrillic_count / letter_count > 0.3) if letter_count > 0 else False
 
-def ollama_generate_sync(model: str, prompt: str, temperature: Optional[float] = 0.1) -> str:
+def ollama_generate_sync(model: str, prompt: str, options: Optional[Dict[str, Any]] = None) -> str:
     try:
         request_json = {
             "model": model,
             "prompt": prompt,
             "stream": False,
         }
-        if temperature is not None:
-            request_json["options"] = {"temperature": temperature, "num_ctx": 4096}
+        if options:
+            request_json["options"] = options
         response = requests.post(
             f"{OLLAMA_URL}/api/generate",
             json=request_json,
@@ -690,22 +690,27 @@ def get_default_model(models, keyword, saved_val=None):
             return m
     return None
 
-def extract_temperature_from_description(content: str) -> Optional[float]:
+def parse_parameters(content: str):
+    """Return list of (key, value) pairs for PARAMETER lines at tail of template."""
+    params = []
     if not content:
-        return None
-    patterns = [
-        r'^\s*PARAMETER\s+temperature\s+([+-]?\d+(?:[.,]\d+)?)\b',
-        r'\btemperature\s*[:=]\s*([+-]?\d+(?:[.,]\d+)?)\b',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, content, re.IGNORECASE | re.MULTILINE)
+        return params
+    for line in content.splitlines():
+        match = re.match(r'^\s*PARAMETER\s+(\S+)\s+(.+)$', line, flags=re.IGNORECASE)
         if not match:
             continue
+        key = match.group(1).strip()
+        val_raw = match.group(2).strip()
+        # Try numeric conversion; keep string on failure
         try:
-            return float(match.group(1).replace(",", "."))
+            if re.match(r'^[+-]?\d+$', val_raw):
+                val = int(val_raw)
+            else:
+                val = float(val_raw.replace(",", "."))
         except Exception:
-            continue
-    return None
+            val = val_raw
+        params.append((key, val))
+    return params
 
 def build_generated_model_name(source_model: str, role: str) -> str:
     source_base = source_model.split("/")[-1].split(":", 1)[0]
@@ -718,30 +723,41 @@ def build_generated_model_name(source_model: str, role: str) -> str:
     return f"{safe_source_base}-{safe_role}"
 
 def parse_role_config(role_key):
+    """
+    Returns (source_model, system_prompt, params_list).
+    - source_model: string from FROM <model> or default qwen2.5:latest
+    - system_prompt: text after SYSTEM or whole content
+    - params_list: list of (key, value) pairs from PARAMETER lines
+    """
     if not role_key or role_key == UNDEFINED_ROLE:
-        return None, None, None, False
+        return None, None, []
         
     content = template_manager.get(role_key)
     if not content:
         # Fallback to defaults if key exists in defaults
         content = DEFAULT_TEMPLATES.get(role_key, "")
     
-    # Simple parsing of Modelfile-like content
-    model_match = re.search(r'^FROM\s+([^\s]+)', content, re.MULTILINE | re.IGNORECASE)
+    model_match = re.search(r'^\s*FROM\s+([^\s]+)', content, re.MULTILINE | re.IGNORECASE)
     source_model = model_match.group(1).strip() if model_match else None
-    use_role_model = bool(source_model)
-    model = build_generated_model_name(source_model, role_key) if use_role_model else "qwen2.5:latest"
+    effective_model = source_model or "qwen2.5:latest"
     
-    # Extract System Prompt
     system_match = re.search(r'SYSTEM\s+"""(.*?)"""', content, re.DOTALL | re.IGNORECASE)
     if not system_match:
         system_match = re.search(r'SYSTEM\s+(.*)', content, re.IGNORECASE)
-        
-    system = system_match.group(1).strip() if system_match else content
-    temperature = extract_temperature_from_description(content)
+    system = system_match.group(1).strip() if system_match else content.strip()
     
-    # Clean system prompt (remove potential escape issues if needed)
-    return model, system, temperature, use_role_model
+    params = parse_parameters(content)
+    
+    return effective_model, system, params
+
+def params_to_options(params, fallback_temp: Optional[float] = None) -> Dict[str, Any]:
+    opts = {}
+    for key, val in params:
+        opts[key] = val
+    lower_keys = {k.lower() for k in opts.keys()}
+    if "temperature" not in lower_keys and fallback_temp is not None:
+        opts["temperature"] = fallback_temp
+    return opts
 
 def compile_process(text, preset_name, progress=gr.Progress()):
     if not text: return "Error: Input text required", "", ""
@@ -756,49 +772,41 @@ def compile_process(text, preset_name, progress=gr.Progress()):
         stru_role = preset.get("structurer")
         vali_role = preset.get("validator")
 
-        # Stage 0: Translator
-        t_model, t_sys, t_temp, t_use_role_model = parse_role_config(trans_role)
-        if has_cyrillic(text):
-            if not t_model: return "Error: Translator required for Cyrillic (role undefined)", "", ""
-            
+        # Stage 0: Translator (optional)
+        t_model, t_sys, t_params = parse_role_config(trans_role)
         if t_model:
             progress(0.2, desc=f"Translating via {trans_role} ({t_model})...")
-            translator_prompt = text if t_use_role_model else f"{t_sys}\n\nUSER TEXT:\n{text}"
-            translator_temp = None if t_use_role_model else (t_temp if t_temp is not None else 0.05)
-            input_en = ollama_generate_sync(t_model, translator_prompt, translator_temp)
+            translator_prompt = f"{t_sys}\n\nUSER TEXT:\n{text}" if t_sys else text
+            t_options = params_to_options(t_params, fallback_temp=0.05)
+            input_en = ollama_generate_sync(t_model, translator_prompt, t_options)
+        
+        # Stage 1: Extractor (optional)
+        e_model, e_sys, e_params = parse_role_config(extr_role)
+        if e_model:
+            progress(0.4, desc=f"Extracting facts via {extr_role} ({e_model})...")
+            extractor_prompt = f"{e_sys}\n\nINPUT:\n{input_en}" if e_sys else input_en
+            e_options = params_to_options(e_params, fallback_temp=0.1)
+            facts = normalize_facts(ollama_generate_sync(e_model, extractor_prompt, e_options))
         else:
-            # If no translator, use original text as input_en (already set)
-            pass
+            facts = normalize_facts(input_en)
         
-        # Stage 1: Extractor
-        e_model, e_sys, e_temp, e_use_role_model = parse_role_config(extr_role)
-        if not e_model: return "Error: Extractor role undefined", "", ""
-        progress(0.4, desc=f"Extracting facts via {extr_role} ({e_model})...")
-        extractor_prompt = input_en if e_use_role_model else f"{e_sys}\n\nINPUT:\n{input_en}"
-        extractor_temp = None if e_use_role_model else (e_temp if e_temp is not None else 0.1)
-        facts = normalize_facts(ollama_generate_sync(e_model, extractor_prompt, extractor_temp))
-        
-        # Stage 2: Structurer
-        s_model, s_sys, s_temp, s_use_role_model = parse_role_config(stru_role)
-        if not s_model: return "Error: Structurer role undefined", "", ""
-        progress(0.7, desc=f"Structuring via {stru_role} ({s_model})...")
-        if s_use_role_model:
-            stru_p = f"DESCRIPTION:\n{input_en}\n\nFACTS:\n{facts}\n\nOUTPUT:"
+        # Stage 2: Structurer (optional)
+        s_model, s_sys, s_params = parse_role_config(stru_role)
+        if s_model:
+            progress(0.7, desc=f"Structuring via {stru_role} ({s_model})...")
+            stru_p = f"{s_sys}\n\nDESCRIPTION:\n{input_en}\n\nFACTS:\n{facts}\n\nOUTPUT:" if s_sys else f"{facts}\n\nOUTPUT:"
+            s_options = params_to_options(s_params, fallback_temp=0.15)
+            structured = ollama_generate_sync(s_model, stru_p, s_options)
         else:
-            stru_p = f"{s_sys}\n\nDESCRIPTION:\n{input_en}\n\nFACTS:\n{facts}\n\nOUTPUT:"
-        stru_temp = None if s_use_role_model else (s_temp if s_temp is not None else 0.15)
-        structured = ollama_generate_sync(s_model, stru_p, stru_temp)
+            structured = facts
         
-        # Stage 3: Validator (Optional)
-        v_model, v_sys, v_temp, v_use_role_model = parse_role_config(vali_role)
+        # Stage 3: Validator (optional)
+        v_model, v_sys, v_params = parse_role_config(vali_role)
         if v_model:
             progress(0.9, desc=f"Validating via {vali_role} ({v_model})...")
-            if v_use_role_model:
-                vali_p = f"FACTS:\n{facts}\n\nCANDIDATE:\n{structured}\n\nFIXED:"
-            else:
-                vali_p = f"{v_sys}\n\nFACTS:\n{facts}\n\nCANDIDATE:\n{structured}\n\nFIXED:"
-            vali_temp = None if v_use_role_model else (v_temp if v_temp is not None else 0.1)
-            structured = ollama_generate_sync(v_model, vali_p, vali_temp)
+            vali_p = f"{v_sys}\n\nFACTS:\n{facts}\n\nCANDIDATE:\n{structured}\n\nFIXED:" if v_sys else f"FACTS:\n{facts}\n\nCANDIDATE:\n{structured}\n\nFIXED:"
+            v_options = params_to_options(v_params, fallback_temp=0.1)
+            structured = ollama_generate_sync(v_model, vali_p, v_options)
             
         progress(1.0, desc="Complete!")
         return structured
@@ -1126,7 +1134,7 @@ with gr.Blocks() as demo:
                 with gr.Column(scale=1):
                     input_text = gr.TextArea(label="User Description", placeholder="Deep detailed scene description...", lines=10)
                     mode_sel = gr.Dropdown(choices=pipeline_preset_manager.keys(), label="Pipeline Preset", value="Default")
-                    compile_btn = gr.Button("🚀 Compile Pipeline", variant="primary")
+                    compile_btn = gr.Button("🚀 Compile prompt", variant="primary")
                 
                 with gr.Column(scale=1):
                     final_out = gr.TextArea(label="Final Structured Prompt", lines=15)
@@ -1202,10 +1210,7 @@ with gr.Blocks() as demo:
                     cancel_add_btn = gr.Button("❌ Cancel")
                 
             template_content = gr.TextArea(label="System Template", lines=10, value=template_manager.get("translator"))
-            with gr.Row():
-                save_template_btn = gr.Button("Save role preset", variant="primary", scale=1, min_width=90)
-                generate_model_btn = gr.Button("Generate Pipeline Model", scale=1, min_width=140)
-            generate_model_status = gr.Markdown("---")
+            save_template_btn = gr.Button("Save role preset", variant="primary", scale=1, min_width=90)
 
         with gr.Tab("🦙 Ollama models"):
 
@@ -1443,124 +1448,19 @@ with gr.Blocks() as demo:
         template_manager.set(role, content)
         gr.Info(f"Template for '{role}' saved!")
 
-    def generate_model(role, content, progress=gr.Progress()):
-        def generate_ui_state(is_generating, status_text=""):
-            return (
-                gr.update(interactive=not is_generating),
-                gr.update(value=status_text)
-            )
-
-        yield generate_ui_state(True, "Connecting to Ollama create API...")
-
-        if not role:
-            gr.Warning("Select a role preset first.")
-            yield generate_ui_state(False, "Select a role preset first.")
-            return
-        if not content or not content.strip():
-            gr.Warning("System template is empty.")
-            yield generate_ui_state(False, "System template is empty.")
-            return
-
-        # Persist editor content to preset, then always build from preset source.
-        template_manager.set(role, content)
-        preset_content = template_manager.get(role)
-        if not preset_content or not preset_content.strip():
-            gr.Warning(f"Preset '{role}' is empty.")
-            yield generate_ui_state(False, f"Preset '{role}' is empty.")
-            return
-
-        lines = preset_content.splitlines()
-        first_non_empty = next((ln.strip() for ln in lines if ln.strip()), "")
-        from_match = re.match(r"^FROM\s+([^\s#]+)", first_non_empty, flags=re.IGNORECASE)
-        if not from_match:
-            gr.Warning("First non-empty line must be `FROM <model>` (for example: `FROM qwen3:8b`).")
-            yield generate_ui_state(False, "First non-empty line must be `FROM <model>`.")
-            return
-
-        source_model = from_match.group(1).strip()
-        model_name = build_generated_model_name(source_model, role)
-        modelfile_content = preset_content.rstrip() + "\n"
-
-        progress(0, desc=f"Creating {model_name}...")
-        yield generate_ui_state(True, f"Creating `{model_name}`...")
-
-        try:
-            request_json = {
-                "name": model_name,
-                "from": source_model,
-                "modelfile": modelfile_content
-            }
-
-            with ollama_lock:
-                with requests.post(
-                    f"{OLLAMA_URL}/api/create",
-                    json=request_json,
-                    stream=True,
-                    timeout=(10, 1800)
-                ) as response:
-                    response.raise_for_status()
-                    for raw_line in response.iter_lines(decode_unicode=True):
-                        if not raw_line:
-                            continue
-                        try:
-                            event = json.loads(raw_line)
-                        except Exception:
-                            continue
-
-                        if event.get("error"):
-                            raise RuntimeError(str(event["error"]))
-
-                        status = str(event.get("status") or "").strip() or "Creating model..."
-                        completed = event.get("completed")
-                        total = event.get("total")
-                        pct = None
-                        if isinstance(completed, (int, float)) and isinstance(total, (int, float)) and total > 0:
-                            pct = max(0.0, min(1.0, float(completed) / float(total)))
-                            status = f"{status} ({int(completed)}/{int(total)})"
-
-                        progress(0 if pct is None else pct, desc=status)
-                        last_status = status
-                        yield generate_ui_state(True, status)
-
-            progress(1.0, desc=f"Model {model_name} created")
-            gr.Info(f"Model '{model_name}' generated successfully.")
-            yield generate_ui_state(False, f"Successfully generated `{model_name}`")
-            return
-
-        except requests.HTTPError as e:
-            err_text = ""
-            try:
-                resp = e.response
-                if resp is not None:
-                    try:
-                        err_json = resp.json()
-                        err_text = str(err_json.get("error") or err_json).strip()
-                    except Exception:
-                        err_text = (resp.text or "").strip()
-            except Exception:
-                err_text = ""
-            err = err_text or str(e).strip() or "Unknown error"
-            gr.Warning(f"Failed to generate model '{model_name}': {err}")
-            progress(1.0, desc=f"Error: {err}")
-            yield generate_ui_state(False, f"Failed to generate `{model_name}`: {err}")
-            return
-
-        except Exception as e:
-            err = str(e).strip() or "Unknown error"
-            gr.Warning(f"Failed to generate model '{model_name}': {err}")
-            progress(1.0, desc=f"Error: {err}")
-            yield generate_ui_state(False, f"Failed to generate `{model_name}`: {err}")
-            return
-        
     save_template_btn.click(save_template, [role_preset, template_content], None)
-    generate_model_btn.click(
-        generate_model,
-        [role_preset, template_content],
-        [generate_model_btn, generate_model_status],
-        show_progress="full"
-    )
+
     
-    copy_btn.click(fn=None, inputs=final_out, js="(x) => { navigator.clipboard.writeText(x); alert('Copied to clipboard!'); }")
+    def notify_copied(_):
+        gr.Info("Copied to clipboard")
+        return None
+
+    copy_btn.click(
+        fn=notify_copied,
+        inputs=final_out,
+        outputs=None,
+        js="(x) => { navigator.clipboard.writeText(x); }"
+    )
     clear_btn.click(lambda: ["", ""], None, [input_text, final_out])
 
 if __name__ == "__main__":
