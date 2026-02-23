@@ -1,8 +1,10 @@
-import gradio as gr
+﻿import gradio as gr
 import subprocess
 import json
 import html as html_lib
 import re
+import base64
+import io
 from datetime import datetime
 import threading
 import time
@@ -36,6 +38,7 @@ APP_DIR = Path(__file__).parent
 SETTINGS_FILE = APP_DIR / "pipeline_settings.json"
 PIPELINE_PRESETS_FILE = APP_DIR / "pipeline_presets.json"
 OLLAMA_URL = "http://localhost:11434"
+VISION_MODEL_NOT_AVAILABLE = "-- not available --"
 
 # Lock for Ollama CLI commands
 ollama_lock = threading.Lock()
@@ -253,6 +256,373 @@ def parse_list_output(output):
             })
     return models
 
+
+def extract_png_metadata(image_path: str) -> dict:
+    result = {
+        "prompt_text": "",
+        "params": {},
+        "error": None,
+    }
+    try:
+        from PIL import Image
+    except Exception as e:
+        result["error"] = f"Pillow import error: {e}"
+        return result
+
+    try:
+        with Image.open(image_path) as img:
+            if not hasattr(img, "info") or not img.info:
+                result["error"] = "No metadata found in image"
+                return result
+
+            raw_prompt = img.info.get("prompt")
+            if not raw_prompt:
+                result["error"] = "No ComfyUI prompt metadata found"
+                return result
+
+            try:
+                prompt_data = json.loads(raw_prompt)
+            except json.JSONDecodeError:
+                result["error"] = "Could not parse prompt metadata"
+                return result
+
+            for _, node_data in prompt_data.items():
+                if not isinstance(node_data, dict):
+                    continue
+                inputs = node_data.get("inputs", {})
+                class_type = node_data.get("class_type", "")
+
+                if "text" in inputs and isinstance(inputs["text"], str):
+                    if len(inputs["text"]) > len(result["prompt_text"]):
+                        result["prompt_text"] = inputs["text"]
+
+                if "KSampler" in class_type or "sampler" in class_type.lower():
+                    if "seed" in inputs:
+                        result["params"]["seed"] = inputs["seed"]
+                    if "steps" in inputs:
+                        result["params"]["steps"] = inputs["steps"]
+                    if "cfg" in inputs:
+                        result["params"]["cfg"] = inputs["cfg"]
+                    if "sampler_name" in inputs:
+                        result["params"]["sampler"] = inputs["sampler_name"]
+                    if "scheduler" in inputs:
+                        result["params"]["scheduler"] = inputs["scheduler"]
+
+                if "width" in inputs and "height" in inputs:
+                    result["params"]["width"] = inputs["width"]
+                    result["params"]["height"] = inputs["height"]
+
+            if not result["prompt_text"]:
+                result["error"] = "Prompt text not found in metadata"
+
+    except Exception as e:
+        result["error"] = f"Error reading image: {str(e)}"
+
+    return result
+
+
+def format_metadata_display(metadata: dict) -> str:
+    if metadata.get("error"):
+        return f"⚠️ {metadata['error']}"
+
+    lines = []
+    if metadata.get("prompt_text"):
+        lines.append(f"📝 Prompt:\n{metadata['prompt_text']}\n")
+
+    params = metadata.get("params", {})
+    if params:
+        lines.append("⚙️ Settings:")
+        if "seed" in params:
+            lines.append(f"  Seed: {params['seed']}")
+        if "steps" in params:
+            lines.append(f"  Steps: {params['steps']}")
+        if "cfg" in params:
+            lines.append(f"  CFG: {params['cfg']}")
+        if "sampler" in params:
+            lines.append(f"  Sampler: {params['sampler']}")
+        if "scheduler" in params:
+            lines.append(f"  Scheduler: {params['scheduler']}")
+        if "width" in params and "height" in params:
+            lines.append(f"  Size: {params['width']}x{params['height']}")
+
+    if not lines:
+        return "No generation parameters found in metadata"
+    return "\n".join(lines)
+
+
+def get_model_capabilities(model_name: str) -> set:
+    capabilities_out = set()
+    try:
+        response = requests.post(
+            f"{OLLAMA_URL}/api/show",
+            json={"model": model_name},
+            timeout=20
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        capabilities = data.get("capabilities")
+        if capabilities is None:
+            capabilities = data.get("details", {}).get("capabilities", [])
+        if isinstance(capabilities, str):
+            capabilities = [capabilities]
+        if isinstance(capabilities, list):
+            capabilities_lower = {str(c).strip().lower() for c in capabilities}
+            if {"vision", "image", "multimodal"} & capabilities_lower:
+                capabilities_out.add("vision")
+            if {"completion", "generate", "chat", "text"} & capabilities_lower:
+                capabilities_out.add("text")
+
+        details = data.get("details", {})
+        family_blob = " ".join([
+            str(details.get("family", "")),
+            str(details.get("families", "")),
+            str(details.get("parent_model", "")),
+        ]).lower()
+        if any(k in family_blob for k in ("llava", "vision", "vl", "moondream", "minicpm", "qwen2.5vl", "qwen2vl")):
+            capabilities_out.add("vision")
+    except Exception:
+        pass
+
+    name_lower = model_name.lower()
+    if any(
+        k in name_lower
+        for k in ("llava", "bakllava", "moondream", "minicpm-v", "qwen2.5vl", "qwen2vl", "vision", "-vl")
+    ):
+        capabilities_out.add("vision")
+    if "embed" not in name_lower:
+        capabilities_out.add("text")
+
+    return capabilities_out
+
+
+def supports_vision_model(model_name: str) -> bool:
+    return "vision" in get_model_capabilities(model_name)
+
+
+def get_vision_model_choices():
+    models = list_models()
+    vision_models = [model for model in models if "vision" in get_model_capabilities(model)]
+    if not vision_models:
+        return [VISION_MODEL_NOT_AVAILABLE]
+    return vision_models
+
+
+def ollama_describe_image_stream(model: str, image_path: str, prompt: str, detail_mode: str = "Fast"):
+    from PIL import Image
+
+    mode = (detail_mode or "Fast").strip().lower()
+    is_ultra = mode.startswith("ultra")
+    is_detailed = mode.startswith("detailed")
+    mode_label = "Ultra Detail" if is_ultra else ("Detailed" if is_detailed else "Fast")
+
+    prompt = " ".join((prompt or "").split())
+    prompt_limit = 700 if is_ultra else (420 if is_detailed else 220)
+    if len(prompt) > prompt_limit:
+        prompt = prompt[:prompt_limit]
+
+    # Keep image long side at 1024px before sending to Ollama.
+    # Retry by adjusting generation budget only, inside requested ranges.
+    if is_ultra:
+        attempts = [
+            {"max_side": 1024, "num_predict": 420, "num_ctx": 6144, "timeout": 180, "prompt": prompt},
+            {
+                "max_side": 896,
+                "num_predict": 360,
+                "num_ctx": 5120,
+                "timeout": 210,
+                "prompt": "Describe only visible content in this image in up to 12 concise sentences."
+            },
+            {
+                "max_side": 768,
+                "num_predict": 300,
+                "num_ctx": 4096,
+                "timeout": 240,
+                "prompt": "Describe only visible content in this image in up to 12 concise sentences."
+            },
+            {
+                "max_side": 512,
+                "num_predict": 240,
+                "num_ctx": 3072,
+                "timeout": 270,
+                "prompt": "Describe only visible content in this image in up to 12 concise sentences."
+            },
+        ]
+    elif is_detailed:
+        attempts = [
+            {"max_side": 1024, "num_predict": 300, "num_ctx": 4096, "timeout": 120, "prompt": prompt},
+            {
+                "max_side": 896,
+                "num_predict": 260,
+                "num_ctx": 3584,
+                "timeout": 140,
+                "prompt": "Describe only visible content in this image in up to 8 concise sentences."
+            },
+            {
+                "max_side": 768,
+                "num_predict": 220,
+                "num_ctx": 3072,
+                "timeout": 160,
+                "prompt": "Describe only visible content in this image in up to 8 concise sentences."
+            },
+            {
+                "max_side": 512,
+                "num_predict": 180,
+                "num_ctx": 2040,
+                "timeout": 180,
+                "prompt": "Describe only visible content in this image in up to 8 concise sentences."
+            },
+        ]
+    else:
+        attempts = [
+            {"max_side": 1024, "num_predict": 180, "num_ctx": 3072, "timeout": 45, "prompt": prompt},
+            {
+                "max_side": 896,
+                "num_predict": 170,
+                "num_ctx": 2560,
+                "timeout": 55,
+                "prompt": "Describe only visible content in this image in up to 4 concise sentences."
+            },
+            {
+                "max_side": 768,
+                "num_predict": 160,
+                "num_ctx": 2304,
+                "timeout": 65,
+                "prompt": "Describe only visible content in this image in up to 4 concise sentences."
+            },
+            {
+                "max_side": 512,
+                "num_predict": 150,
+                "num_ctx": 2040,
+                "timeout": 80,
+                "prompt": "Describe only visible content in this image in up to 4 concise sentences."
+            },
+        ]
+
+    for idx, attempt in enumerate(attempts):
+        yield None, f"Connecting to Ollama ({mode_label})... attempt {idx + 1}/{len(attempts)}"
+
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            width, height = img.size
+            if max(width, height) > attempt["max_side"]:
+                scale = attempt["max_side"] / float(max(width, height))
+                img = img.resize((int(width * scale), int(height * scale)), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        request_json = {
+            "model": model,
+            "prompt": attempt["prompt"],
+            "images": [image_b64],
+            "stream": False,
+            "options": {
+                "num_predict": attempt["num_predict"],
+                "temperature": 0.2,
+                "num_ctx": attempt["num_ctx"]
+            }
+        }
+        response = None
+        chunks = []
+        try:
+            response = requests.post(
+                f"{OLLAMA_URL}/api/generate",
+                json=request_json,
+                stream=True,
+                timeout=(15, attempt["timeout"])
+            )
+            response.raise_for_status()
+            last_emit = 0.0
+            yield None, "Model loaded. Generating..."
+
+            for raw in response.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+
+                if obj.get("error"):
+                    raise Exception(str(obj.get("error")))
+
+                piece = obj.get("response") or ""
+                if piece:
+                    chunks.append(piece)
+                    now = time.time()
+                    if now - last_emit >= 0.3:
+                        partial = "".join(chunks).strip()
+                        yield partial, f"Generating... {len(partial)} chars"
+                        last_emit = now
+
+                if obj.get("done"):
+                    break
+
+            final_text = "".join(chunks).strip()
+            if not final_text:
+                raise Exception(f"Empty response from model `{model}`.")
+            yield final_text, f"Description generated via `{model}`."
+            return
+        except requests.ReadTimeout:
+            if chunks:
+                partial = "".join(chunks).strip()
+                if partial:
+                    yield partial, "Timed out, returning partial description."
+                    return
+            if idx < len(attempts) - 1:
+                yield None, "No response yet. Retrying with lighter settings..."
+                continue
+            raise Exception(
+                "Ollama stream timed out after retries. "
+                "The selected vision model is too slow or stuck on this image."
+            )
+        except requests.ConnectionError as e:
+            if idx < len(attempts) - 1:
+                yield None, f"Connection issue: {str(e)}. Retrying..."
+                continue
+            raise Exception(f"Ollama connection failed: {str(e)}")
+        except requests.Timeout:
+            if idx < len(attempts) - 1:
+                yield None, "Request timed out. Retrying with lighter settings..."
+                continue
+            raise Exception("Ollama request timed out.")
+        except requests.HTTPError as e:
+            detail = ""
+            if e.response is not None:
+                try:
+                    detail = (e.response.json().get("error") or "").strip()
+                except Exception:
+                    detail = (e.response.text or "").strip()
+            status = e.response.status_code if e.response is not None else "unknown"
+            detail_lower = detail.lower()
+            runner_crash = (
+                "model runner has unexpectedly stopped" in detail_lower
+                or "forcibly closed" in detail_lower
+                or "assertion failed" in detail_lower
+            )
+            if runner_crash and idx < len(attempts) - 1:
+                yield None, "Vision runner crashed on current settings. Retrying with safer image size..."
+                continue
+            if detail:
+                raise Exception(f"Ollama API {status}: {detail}")
+            raise Exception(f"Ollama API {status}: {str(e)}")
+        except requests.RequestException as e:
+            if idx < len(attempts) - 1:
+                yield None, f"Request error: {str(e)}. Retrying..."
+                continue
+            raise Exception(f"Ollama request failed: {str(e)}")
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    raise Exception(
+        "Ollama request timed out after retries. "
+        f"The selected vision model is too slow or stuck on this image (mode: {mode_label})."
+    )
+
 def get_gpu_stats():
     stats = {
         'gpu_percent': 0, 'vram_percent': 0, 'vram_used': 0,
@@ -296,6 +666,57 @@ TRANSLATOR_SYSTEM = "Translate usage text into English. Output only translation.
 EXTRACTOR_SYSTEM = "Extract atomic facts from description. LOSSLESS. One fact per line."
 STRUCTURER_SYSTEM = "Organize facts into structured blocks [Perspective], [Subject], etc. LOSSLESS."
 VALIDATOR_SYSTEM = "Strict validator. Fix missing/added details in structured prompt."
+ULTRA_DETAIL_PROMPT = """Describe the image as thoroughly and objectively as possible, like a professional visual analyst.
+Do not invent details that are not clearly visible.
+Structure the response strictly according to the sections below.
+
+1. Overall Scene:
+   - What is happening?
+   - Type of image (photograph, illustration, 3D render, anime, painting, etc.)
+   - General mood and atmosphere.
+
+2. Composition:
+   - Camera angle (top-down, low-angle, frontal, etc.)
+   - Framing (close-up, medium shot, full body, wide shot, etc.)
+   - Placement of key subjects within the frame.
+   - Depth structure (foreground, midground, background).
+
+3. Main Subjects or Characters:
+   - Number of subjects.
+   - Apparent gender, approximate age, build (if visible).
+   - Pose, gestures, facial expression.
+   - Clothing, accessories, visible textures of materials.
+   - Distinguishing features (tattoos, logos, jewelry, markings, etc.).
+
+4. Environment and Background Details:
+   - Interior or exterior setting.
+   - Architecture, furniture, natural elements, objects.
+   - Small visible details that stand out.
+
+5. Color and Lighting:
+   - Dominant colors.
+   - Contrast level.
+   - Type of lighting (natural, studio, neon, cinematic, etc.).
+   - Direction of light.
+   - Shadows and reflections.
+
+6. Textures and Materials:
+   - Skin, fabric, metal, glass, wood, etc.
+   - Level of surface detail (pores, brush strokes, grain, noise, gloss, etc.).
+
+7. Style and Technical Characteristics:
+   - Artistic style.
+   - Realism vs stylization.
+   - Signs of AI generation or post-processing (if noticeable).
+   - Approximate image quality and resolution impression.
+
+8. Additional Observations:
+   - Visual emphasis or focal points.
+   - Symbolism or narrative hints (only if clearly implied).
+   - Any unusual or notable elements.
+
+Write in an informative, precise manner without unnecessary artistic embellishment.
+Limit the response to approximately 400-600 words."""
 
 def normalize_facts(text: str) -> str:
     lines = []
@@ -974,10 +1395,17 @@ def get_models_html():
             safe_id = html_lib.escape(m["id"])
             safe_size = html_lib.escape(m["size"])
             safe_model_attr = html_lib.escape(m["name"], quote=True)
+            capabilities = get_model_capabilities(m["name"])
+            capability_bits = []
+            if "text" in capabilities:
+                capability_bits.append("📝 text")
+            if "vision" in capabilities:
+                capability_bits.append("🖼️ vision")
+            capability_suffix = f" | {' | '.join(capability_bits)}" if capability_bits else ""
             models_html += f"""
             <div class="model-item">
                 <div class="model-name">{safe_name}</div>
-                <div class="model-meta">ID: {safe_id} | Size: {safe_size}</div>
+                <div class="model-meta">ID: {safe_id} | Size: {safe_size}{capability_suffix}</div>
                 <div class="model-actions">
                     <button type="button" class="model-action-btn" data-action="info" data-model="{safe_model_attr}">Info</button>
                     <button type="button" class="model-action-btn delete" data-action="delete" data-model="{safe_model_attr}">Delete</button>
@@ -989,6 +1417,7 @@ def get_models_html():
     return "<p>Error loading models</p>"
 
 def refresh_models_panel():
+    vision_model_choices = get_vision_model_choices()
     return (
         get_models_html(),
         gr.update(value=""),
@@ -996,6 +1425,7 @@ def refresh_models_panel():
         gr.update(value=""),
         gr.update(value=""),
         gr.update(visible=False),
+        gr.update(choices=vision_model_choices, value=vision_model_choices[0]),
     )
 
 def handle_model_action(payload):
@@ -1135,6 +1565,31 @@ with gr.Blocks() as demo:
                     input_text = gr.TextArea(label="User Description", placeholder="Deep detailed scene description...", lines=10)
                     mode_sel = gr.Dropdown(choices=pipeline_preset_manager.keys(), label="Pipeline Preset", value="Default")
                     compile_btn = gr.Button("🚀 Compile prompt", variant="primary")
+                    with gr.Accordion("Get PNG info", open=False):
+                        gr.Markdown("*Upload PNG to extract prompt metadata*")
+                        png_meta_image = gr.Image(label="PNG image", type="filepath", height=220)
+                        png_meta_output = gr.Textbox(
+                            label="PNG info",
+                            lines=8,
+                            interactive=False
+                        )
+                    with gr.Accordion("Create description from image", open=False):
+                        gr.Markdown("*Upload image and click Get description*")
+                        desc_image = gr.Image(label="Image", type="filepath", height=220)
+                        vision_model_choices = get_vision_model_choices()
+                        desc_model_sel = gr.Dropdown(
+                            label="Vision model",
+                            choices=vision_model_choices,
+                            value=vision_model_choices[0],
+                            allow_custom_value=False
+                        )
+                        desc_detail_mode = gr.Radio(
+                            label="Description mode",
+                            choices=["Fast", "Detailed", "Ultra Detail"],
+                            value="Fast"
+                        )
+                        desc_btn = gr.Button("Get description", variant="primary")
+                        desc_status = gr.Markdown("")
                 
                 with gr.Column(scale=1):
                     final_out = gr.TextArea(label="Final Structured Prompt", lines=15)
@@ -1152,7 +1607,7 @@ with gr.Blocks() as demo:
             with gr.Row() as pipeline_preset_select_row:
                 pipeline_preset = gr.Dropdown(choices=pipeline_preset_manager.keys(), label="Pipeline Presets", value="Default", scale=3)
                 with gr.Column(scale=1):
-                    add_pipeline_preset_btn = gr.Button("➕ Add New Preset")
+                    add_pipeline_preset_btn = gr.Button("вћ• Add New Preset")
                     delete_pipeline_preset_btn = gr.Button("🗑️ Delete Preset", variant="stop")
 
             # Add New Pipeline Preset UI
@@ -1195,7 +1650,7 @@ with gr.Blocks() as demo:
             with gr.Row() as preset_select_row:
                 role_preset = gr.Dropdown(choices=template_manager.keys(), label="Role Preset", value="translator", allow_custom_value=True, scale=3)
                 with gr.Column(scale=1):
-                    add_preset_btn = gr.Button("➕ Add New Preset")
+                    add_preset_btn = gr.Button("вћ• Add New Preset")
                     delete_preset_btn = gr.Button("🗑️ Delete Preset", variant="stop")
             
             with gr.Row(visible=False) as delete_confirm_row:
@@ -1265,6 +1720,89 @@ with gr.Blocks() as demo:
 
     # Events
     compile_btn.click(compile_process, [input_text, mode_sel], [final_out])
+
+    def on_png_info_image_change(image_path):
+        if not image_path:
+            return "", gr.update()
+        metadata = extract_png_metadata(image_path)
+        display = format_metadata_display(metadata)
+        prompt_text = (metadata.get("prompt_text") or "").strip()
+        if prompt_text:
+            return display, prompt_text
+        return display, gr.update()
+
+    png_meta_image.change(
+        fn=on_png_info_image_change,
+        inputs=[png_meta_image],
+        outputs=[png_meta_output, input_text]
+    )
+
+    def on_get_description_click(image_path, current_text, selected_model, detail_mode):
+        if not image_path:
+            yield gr.update(), "Please upload an image first."
+            return
+
+        try:
+            from PIL import Image
+            with Image.open(image_path) as img:
+                width, height = img.size
+            if width < 28 or height < 28:
+                yield gr.update(), f"Image is too small ({width}x{height}). Use at least 28x28."
+                return
+        except Exception:
+            pass
+
+        model = (selected_model or "").strip()
+        if not model or model == VISION_MODEL_NOT_AVAILABLE:
+            yield gr.update(), "Vision model not available in Ollama."
+            return
+
+        user_context = (current_text or "").strip()
+        mode = (detail_mode or "Fast").strip().lower()
+        is_ultra = mode.startswith("ultra")
+        is_detailed = mode.startswith("detailed")
+        context_limit = 700 if is_ultra else (420 if is_detailed else 220)
+        sentence_limit = 12 if is_ultra else (8 if is_detailed else 4)
+        if is_ultra:
+            prompt = ULTRA_DETAIL_PROMPT
+        elif user_context:
+            if len(user_context) > context_limit:
+                user_context = user_context[:context_limit]
+            prompt = (
+                "Describe only visible content in this image for image generation. "
+                + f"Keep it concise (up to {sentence_limit} sentences). "
+                + 
+                f"Optional user context: {user_context}"
+            )
+        else:
+            prompt = f"Describe only visible content in this image for image generation in up to {sentence_limit} concise sentences."
+        try:
+            for partial_text, status in ollama_describe_image_stream(model, image_path, prompt, detail_mode):
+                if partial_text is None:
+                    yield gr.update(), status
+                else:
+                    yield partial_text, status
+        except Exception as e:
+            err = str(e)
+            if "model runner has unexpectedly stopped" in err.lower():
+                alternatives = [
+                    m for m in get_vision_model_choices()
+                    if m != VISION_MODEL_NOT_AVAILABLE and m != model
+                ]
+                suggestion = f" Try `{alternatives[0]}`." if alternatives else ""
+                yield gr.update(), (
+                    f"Failed: `{err}` Ollama vision runner crashed for `{model}`.{suggestion} "
+                    "You may also need to restart Ollama."
+                )
+                return
+            yield gr.update(), f"Failed: `{err}`"
+            return
+
+    desc_btn.click(
+        fn=on_get_description_click,
+        inputs=[desc_image, input_text, desc_model_sel, desc_detail_mode],
+        outputs=[input_text, desc_status]
+    )
     
     def save_theme(theme_name):
         settings_manager.set("ui_theme", theme_name)
@@ -1362,7 +1900,7 @@ with gr.Blocks() as demo:
     refresh_models_btn.click(
         refresh_models_panel,
         None,
-        [models_html, model_action_status, model_info_output, model_delete_pending, model_delete_confirm_text, model_delete_confirm_row]
+        [models_html, model_action_status, model_info_output, model_delete_pending, model_delete_confirm_text, model_delete_confirm_row, desc_model_sel]
     )
     model_action_submit.click(
         handle_model_action,
@@ -1381,7 +1919,7 @@ with gr.Blocks() as demo:
     pull_event.then(
         refresh_models_panel,
         None,
-        [models_html, model_action_status, model_info_output, model_delete_pending, model_delete_confirm_text, model_delete_confirm_row]
+        [models_html, model_action_status, model_info_output, model_delete_pending, model_delete_confirm_text, model_delete_confirm_row, desc_model_sel]
     )
     
     cancel_pull_btn.click(cancel_pull_handler, None, [pull_btn, cancel_pull_btn, pull_help, pull_status])
@@ -1473,3 +2011,5 @@ if __name__ == "__main__":
         theme=get_theme_from_settings(),
         head=ACTION_BUTTONS_JS
     )
+
+
