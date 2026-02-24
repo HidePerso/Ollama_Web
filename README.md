@@ -1,79 +1,145 @@
-# Ollama Web Interface
+# Ollama Prompt Helper
 
-Local-first UI for running, inspecting, and managing Ollama models, plus a four-stage text-processing pipeline with per-role presets.
+Локальный веб-интерфейс для работы с Ollama: генерация/улучшение текстовых описаний через многошаговый pipeline, получение описаний по изображению (VLM), управление моделями и мониторинг системы.
 
-## Tech Stack
-- Python 3.8+, Flask, Gradio UI
-- Ollama CLI (localhost:11434)
-- Pinokio launcher scripts (`install.json`, `start.js`) for 1-click setup
+## Актуальное состояние проекта (на 24 февраля 2026)
 
-## Installation
-### Via Pinokio (recommended)
-1. Place repo at `C:\pinokio\api\Ollama_Z.git` (or your Pinokio API directory).
-2. In Pinokio, open the app → run `Install` (creates venv, installs `requirements.txt`).
-3. Click `Start` to launch the UI.
+- UI: Gradio (`app.py`), без отдельного Flask REST backend.
+- Локальный запуск: `http://127.0.0.1:11436`.
+- Интеграция с Ollama: `http://localhost:11434`.
+- Есть 4-этапный pipeline ролей: `translator -> extractor -> structurer -> validator`.
+- Есть вкладка VLM с пресетами (`Fast`, `Detailed`, `Ultra Detailed`, `Ultra detail NSFW`) для генерации описания по картинке.
+- Модели Ollama можно тянуть/обновлять/удалять из UI.
 
-### Manual
+## Возможности
+
+- Генерация финального описания из входного текста через настраиваемый pipeline.
+- Сохранение/загрузка пресетов ролей и pipeline.
+- Визуальное описание изображения (image-to-text) с выбором vision-модели.
+- Автоопределение vision-возможностей модели.
+- Импорт метаданных PNG (ComfyUI prompt/параметры) в текстовое поле.
+- Мониторинг GPU/CPU/RAM прямо в интерфейсе.
+
+## Требования
+
+- Установленный и запущенный Ollama.
+- Python 3.8+.
+- Доступ к `http://localhost:11434`.
+
+## Установка и запуск
+
+### Через Pinokio
+
+1. Откройте проект в Pinokio.
+2. Запустите `Install` (`install.json`).
+3. Запустите `Start` (`start.js`).
+4. Откройте `Open Web UI`.
+
+### Вручную
+
 ```bash
 python -m venv venv
 # Windows
 venv\Scripts\activate
 # macOS/Linux
 source venv/bin/activate
+
 pip install -r requirements.txt
 python app.py
 ```
 
-The UI runs at `http://127.0.0.1:11436` by default.
+После запуска UI доступен по адресу `http://127.0.0.1:11436`.
 
-## Prerequisites
-- Ollama installed and reachable at `http://localhost:11434`.
-- Network access to download models you pull.
+## Рекомендуемые модели Ollama
 
-## Using the App
-### Dashboard
-- System monitors (GPU/CPU/RAM) update automatically.
+Ниже практичные рекомендации для этого интерфейса с учетом размера и качества. Перед использованием выполните `ollama pull <model>`.
 
-### Pipeline tab
-- Four roles: translator → extractor → structurer → validator.
-- Any role may be left empty; empty roles are skipped automatically.
-- Role content follows a Modelfile-like syntax:
-  - `FROM <model>` (optional; defaults to `qwen2.5:latest`)
-  - `SYSTEM ...` for the instruction text (can be plain line or triple-quoted block)
-  - `PARAMETER <key> <value>` lines append to Ollama options (e.g. temperature, top_p, repeat_penalty, num_ctx).
-    ```
-    FROM qwen2.5:8b
-    SYSTEM """Translate to English, keep formatting."""
-    PARAMETER temperature 0.05
-    PARAMETER top_p 0.85
-    PARAMETER repeat_penalty 1.1
-    PARAMETER num_ctx 4096
-    ```
-- Presets let you save/load role sets; editing a preset updates the stored template.
+### Для генерации описаний (текст)
 
-### Models tab
-- Pull, cancel, refresh, inspect, copy, and delete Ollama models with live progress.
+- `qwen3:8b` — основной универсальный вариант (баланс качество/скорость).
+- `poluramus/llama-3.2ft_flux-prompting_v0.5` — модель специализируется на описаниях для FLUX
+- `gnokit/improve-prompt` — быстрый и легкий вариант для слабых GPU/CPU
 
-### App Settings
-- Choose UI theme; restart/reload may be needed for some themes.
+### Для компьютерного зрения (описание изображений)
 
-## API Endpoints (backend)
-- `POST /api/start`, `POST /api/kill`, `POST /api/serve` – control Ollama service.
-- `GET /api/ps`, `GET /api/list` – running/installed models.
-- `POST /api/pull`, `GET /api/pull/all`, `GET /api/pull/progress/<model>`, `POST /api/pull/cancel` – downloads.
-- `POST /api/run`, `POST /api/chat`, `POST /api/chat/stop` – generation/chat.
-- `POST /api/show`, `POST /api/cp`, `POST /api/rm`, `POST /api/stop` – model metadata and lifecycle.
+- `ministral-3:3b` — лучший баланс детализации и ресурсов для image-to-text.
+- `gemma3:4b` — сильный вариант для сложных сцен и reasoning по изображению.
+- `huihui_ai/qwen3-vl-abliterated:2b-instruct` — компактная модель без ограничений по NSFW
+- `jayeshpandit2480/gemma3-UNCENSORED:4b` — баланс детализации и ресурсов без ограничений по NSFW
 
-## Project Structure
-```
-app.py              # Flask/Gradio app
-templates/          # Gradio HTML assets
-requirements.txt    # Python deps
-install.json        # Pinokio install script (venv + pip install)
-start.js            # Pinokio start script (runs app.py, captures URL)
-pinokio.js          # Pinokio launcher UI config
-pipeline_presets.json / templates.json # Saved presets and role templates
+Примеры загрузки:
+
+```bash
+ollama pull qwen3:8b
+ollama pull qwen2.5vl:7b
+ollama pull llama3.2-vision:11b
 ```
 
-## License
+## Программный API (через Ollama)
+
+Приложение не поднимает свой REST API для внешних клиентов. Для интеграций используйте стандартный API Ollama (`http://localhost:11434`).
+
+### cURL
+
+```bash
+curl http://localhost:11434/api/chat -d '{
+  "model": "qwen3:8b",
+  "messages": [
+    {"role": "user", "content": "Сделай краткое описание сцены"}
+  ]
+}'
+```
+
+### Python
+
+```python
+import requests
+
+resp = requests.post(
+    "http://localhost:11434/api/chat",
+    json={
+        "model": "qwen3:8b",
+        "messages": [
+            {"role": "user", "content": "Сделай краткое описание сцены"}
+        ]
+    },
+    timeout=60,
+)
+print(resp.json())
+```
+
+### JavaScript
+
+```javascript
+const response = await fetch('http://localhost:11434/api/chat', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    model: 'qwen3:8b',
+    messages: [{ role: 'user', content: 'Сделай краткое описание сцены' }]
+  })
+});
+
+const data = await response.json();
+console.log(data);
+```
+
+## Структура проекта
+
+```text
+app.py
+requirements.txt
+templates/
+pipeline_presets.json
+pipeline_settings.json
+templates.json
+vlm_presets.json
+install.json
+start.js
+reset.json
+pinokio.js
+```
+
+## Лицензия
+
 MIT
