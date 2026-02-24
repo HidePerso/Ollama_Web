@@ -1,41 +1,41 @@
 # Ollama Prompt Helper
 
-Локальный веб-интерфейс для работы с Ollama: генерация/улучшение текстовых описаний через многошаговый pipeline, получение описаний по изображению (VLM), управление моделями и мониторинг системы.
+Local web interface for Ollama: generate/improve text descriptions through a multi-step pipeline, generate descriptions from images (VLM), manage models, and monitor system resources.
 
-## Актуальное состояние проекта (на 24 февраля 2026)
+## Current Project State (as of February 24, 2026)
 
-- UI: Gradio (`app.py`), без отдельного Flask REST backend.
-- Локальный запуск: `http://127.0.0.1:11436`.
-- Интеграция с Ollama: `http://localhost:11434`.
-- Есть 4-этапный pipeline ролей: `translator -> extractor -> structurer -> validator`.
-- Есть вкладка VLM с пресетами (`Fast`, `Detailed`, `Ultra Detailed`, `Ultra detail NSFW`) для генерации описания по картинке.
-- Модели Ollama можно тянуть/обновлять/удалять из UI.
+- UI: Gradio (`app.py`), no separate Flask REST backend.
+- Local app URL: `http://127.0.0.1:11436`.
+- Ollama integration: `http://localhost:11434`.
+- 4-stage role pipeline: `translator -> extractor -> structurer -> validator`.
+- VLM tab with presets (`Fast`, `Detailed`, `Ultra Detailed`, `Ultra detail NSFW`) for image description.
+- Ollama models can be pulled/updated/removed from the UI.
 
-## Возможности
+## Features
 
-- Генерация финального описания из входного текста через настраиваемый pipeline.
-- Сохранение/загрузка пресетов ролей и pipeline.
-- Визуальное описание изображения (image-to-text) с выбором vision-модели.
-- Автоопределение vision-возможностей модели.
-- Импорт метаданных PNG (ComfyUI prompt/параметры) в текстовое поле.
-- Мониторинг GPU/CPU/RAM прямо в интерфейсе.
+- Generate a final description from input text via a configurable pipeline.
+- Save/load role and pipeline presets.
+- Image-to-text description with selectable vision model.
+- Automatic detection of model vision capabilities.
+- Import PNG metadata (ComfyUI prompt/parameters) into the text field.
+- GPU/CPU/RAM monitoring directly in the UI.
 
-## Требования
+## Requirements
 
-- Установленный и запущенный Ollama.
+- Ollama installed and running.
 - Python 3.8+.
-- Доступ к `http://localhost:11434`.
+- Access to `http://localhost:11434`.
 
-## Установка и запуск
+## Installation and Run
 
-### Через Pinokio
+### Via Pinokio
 
-1. Откройте проект в Pinokio.
-2. Запустите `Install` (`install.json`).
-3. Запустите `Start` (`start.js`).
-4. Откройте `Open Web UI`.
+1. Open the project in Pinokio.
+2. Run `Install` (`install.json`).
+3. Run `Start` (`start.js`).
+4. Open `Open Web UI`.
 
-### Вручную
+### Manual
 
 ```bash
 python -m venv venv
@@ -48,26 +48,26 @@ pip install -r requirements.txt
 python app.py
 ```
 
-После запуска UI доступен по адресу `http://127.0.0.1:11436`.
+After launch, the UI is available at `http://127.0.0.1:11436`.
 
-## Рекомендуемые модели Ollama
+## Recommended Ollama Models
 
-Ниже практичные рекомендации для этого интерфейса с учетом размера и качества. Перед использованием выполните `ollama pull <model>`.
+Below are practical recommendations for this interface, balancing quality and resource usage. Before using a model, run `ollama pull <model>`.
 
-### Для генерации описаний (текст)
+### For Description Generation (text)
 
-- `qwen3:8b` — основной универсальный вариант (баланс качество/скорость).
-- `poluramus/llama-3.2ft_flux-prompting_v0.5` — модель специализируется на описаниях для FLUX
-- `gnokit/improve-prompt` — быстрый и легкий вариант для слабых GPU/CPU
+- `qwen3:8b` - main general-purpose option (quality/speed balance).
+- `poluramus/llama-3.2ft_flux-prompting_v0.5` - specialized for FLUX-oriented prompt generation.
+- `gnokit/improve-prompt` - fast/light option for weaker GPU/CPU setups.
 
-### Для компьютерного зрения (описание изображений)
+### For Computer Vision (image description)
 
-- `ministral-3:3b` — лучший баланс детализации и ресурсов для image-to-text.
-- `gemma3:4b` — сильный вариант для сложных сцен и reasoning по изображению.
-- `huihui_ai/qwen3-vl-abliterated:2b-instruct` — компактная модель без ограничений по NSFW
-- `jayeshpandit2480/gemma3-UNCENSORED:4b` — баланс детализации и ресурсов без ограничений по NSFW
+- `ministral-3:3b` - good detail/resource balance for image-to-text.
+- `gemma3:4b` - strong option for complex scenes and image reasoning.
+- `huihui_ai/qwen3-vl-abliterated:2b-instruct` - compact vision model without NSFW restrictions.
+- `jayeshpandit2480/gemma3-UNCENSORED:4b` - detail/resource balance without NSFW restrictions.
 
-Примеры загрузки:
+Pull examples:
 
 ```bash
 ollama pull qwen3:8b
@@ -75,9 +75,9 @@ ollama pull qwen2.5vl:7b
 ollama pull llama3.2-vision:11b
 ```
 
-## Программный API (через Ollama)
+## Programmatic API (via Ollama)
 
-Приложение не поднимает свой REST API для внешних клиентов. Для интеграций используйте стандартный API Ollama (`http://localhost:11434`).
+This app does not expose its own REST API for external clients. For integrations, use the standard Ollama API (`http://localhost:11434`).
 
 ### cURL
 
@@ -85,7 +85,7 @@ ollama pull llama3.2-vision:11b
 curl http://localhost:11434/api/chat -d '{
   "model": "qwen3:8b",
   "messages": [
-    {"role": "user", "content": "Сделай краткое описание сцены"}
+    {"role": "user", "content": "Create a short scene description"}
   ]
 }'
 ```
@@ -100,7 +100,7 @@ resp = requests.post(
     json={
         "model": "qwen3:8b",
         "messages": [
-            {"role": "user", "content": "Сделай краткое описание сцены"}
+            {"role": "user", "content": "Create a short scene description"}
         ]
     },
     timeout=60,
@@ -116,7 +116,7 @@ const response = await fetch('http://localhost:11434/api/chat', {
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
     model: 'qwen3:8b',
-    messages: [{ role: 'user', content: 'Сделай краткое описание сцены' }]
+    messages: [{ role: 'user', content: 'Create a short scene description' }]
   })
 });
 
@@ -124,7 +124,7 @@ const data = await response.json();
 console.log(data);
 ```
 
-## Структура проекта
+## Project Structure
 
 ```text
 app.py
@@ -140,6 +140,6 @@ reset.json
 pinokio.js
 ```
 
-## Лицензия
+## License
 
 MIT
