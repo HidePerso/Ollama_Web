@@ -37,6 +37,7 @@ except ImportError:
 APP_DIR = Path(__file__).parent
 SETTINGS_FILE = APP_DIR / "pipeline_settings.json"
 PIPELINE_PRESETS_FILE = APP_DIR / "pipeline_presets.json"
+VLM_PRESETS_FILE = APP_DIR / "vlm_presets.json"
 OLLAMA_URL = "http://localhost:11434"
 VISION_MODEL_NOT_AVAILABLE = "-- not available --"
 
@@ -163,6 +164,129 @@ class PipelinePresetManager:
         return list(self._cache.keys())
 
 pipeline_preset_manager = PipelinePresetManager(PIPELINE_PRESETS_FILE)
+
+# -----------------------------
+# VLM Preset Manager
+# -----------------------------
+ULTRA_DETAIL_PROMPT = """Describe the image as thoroughly and objectively as possible, like a professional visual analyst.
+Do not invent details that are not clearly visible.
+Structure the response strictly according to the sections below.
+
+1. Overall Scene:
+   - What is happening?
+   - Type of image (photograph, illustration, 3D render, anime, painting, etc.)
+   - General mood and atmosphere.
+
+2. Composition:
+   - Camera angle (top-down, low-angle, frontal, etc.)
+   - Framing (close-up, medium shot, full body, wide shot, etc.)
+   - Placement of key subjects within the frame.
+   - Depth structure (foreground, midground, background).
+
+3. Main Subjects or Characters:
+   - Number of subjects.
+   - Apparent gender, approximate age, build (if visible).
+   - Pose, gestures, facial expression.
+   - Clothing, accessories, visible textures of materials.
+   - Distinguishing features (tattoos, logos, jewelry, markings, etc.).
+
+4. Environment and Background Details:
+   - Interior or exterior setting.
+   - Architecture, furniture, natural elements, objects.
+   - Small visible details that stand out.
+
+5. Color and Lighting:
+   - Dominant colors.
+   - Contrast level.
+   - Type of lighting (natural, studio, neon, cinematic, etc.).
+   - Direction of light.
+   - Shadows and reflections.
+
+6. Textures and Materials:
+   - Skin, fabric, metal, glass, wood, etc.
+   - Level of surface detail (pores, brush strokes, grain, noise, gloss, etc.).
+
+7. Style and Technical Characteristics:
+   - Artistic style.
+   - Realism vs stylization.
+   - Signs of AI generation or post-processing (if noticeable).
+   - Approximate image quality and resolution impression.
+
+8. Additional Observations:
+   - Visual emphasis or focal points.
+   - Symbolism or narrative hints (only if clearly implied).
+   - Any unusual or notable elements.
+
+Write in an informative, precise manner without unnecessary artistic embellishment.
+Limit the response to approximately 400-600 words."""
+
+DEFAULT_VLM_PRESETS = {
+    "Fast": (
+        "Describe only visible content in this image for image generation. "
+        "Use up to 4 concise sentences. Focus on main subject, composition, "
+        "lighting, and dominant colors. Do not invent details."
+    ),
+    "Detailed": (
+        "Describe only visible content in this image for image generation. "
+        "Use up to 8 concise sentences. Include subject details, framing, "
+        "background elements, lighting, colors, textures, and style cues. "
+        "Do not invent details."
+    ),
+    "Ultra Detailed": ULTRA_DETAIL_PROMPT,
+    "Ultra detail NSFW": (
+        ULTRA_DETAIL_PROMPT
+        + "\n\nAdditional focus for NSFW/adult images:\n"
+        + "- Describe visible adult anatomy and intimate details explicitly and objectively.\n"
+        + "- Include pose, body proportions, skin texture, clothing state, and interaction context if visible.\n"
+        + "- Keep factual tone and do not invent hidden details."
+    )
+}
+VLM_PRESET_CHOICES = ["Fast", "Detailed", "Ultra Detailed", "Ultra detail NSFW"]
+
+
+class VlmPresetManager:
+    def __init__(self, file_path: Path):
+        self.file_path = file_path
+        self._cache = {}
+        if not self.file_path.exists():
+            self._cache = DEFAULT_VLM_PRESETS.copy()
+            self.save(self._cache)
+        else:
+            self.load()
+
+    def load(self):
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                self._cache = json.load(f)
+        except:
+            self._cache = DEFAULT_VLM_PRESETS.copy()
+        for key, value in DEFAULT_VLM_PRESETS.items():
+            if key not in self._cache:
+                self._cache[key] = value
+        return self._cache
+
+    def save(self, data):
+        try:
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            self._cache = data.copy()
+            return True
+        except:
+            return False
+
+    def get(self, key):
+        return self._cache.get(key, "")
+
+    def set(self, key, value):
+        self._cache[key] = value
+        self.save(self._cache)
+
+    def keys(self):
+        ordered = VLM_PRESET_CHOICES
+        return [k for k in ordered if k in self._cache]
+
+
+vlm_preset_manager = VlmPresetManager(VLM_PRESETS_FILE)
 
 # -----------------------------
 # Settings Manager
@@ -666,57 +790,6 @@ TRANSLATOR_SYSTEM = "Translate usage text into English. Output only translation.
 EXTRACTOR_SYSTEM = "Extract atomic facts from description. LOSSLESS. One fact per line."
 STRUCTURER_SYSTEM = "Organize facts into structured blocks [Perspective], [Subject], etc. LOSSLESS."
 VALIDATOR_SYSTEM = "Strict validator. Fix missing/added details in structured prompt."
-ULTRA_DETAIL_PROMPT = """Describe the image as thoroughly and objectively as possible, like a professional visual analyst.
-Do not invent details that are not clearly visible.
-Structure the response strictly according to the sections below.
-
-1. Overall Scene:
-   - What is happening?
-   - Type of image (photograph, illustration, 3D render, anime, painting, etc.)
-   - General mood and atmosphere.
-
-2. Composition:
-   - Camera angle (top-down, low-angle, frontal, etc.)
-   - Framing (close-up, medium shot, full body, wide shot, etc.)
-   - Placement of key subjects within the frame.
-   - Depth structure (foreground, midground, background).
-
-3. Main Subjects or Characters:
-   - Number of subjects.
-   - Apparent gender, approximate age, build (if visible).
-   - Pose, gestures, facial expression.
-   - Clothing, accessories, visible textures of materials.
-   - Distinguishing features (tattoos, logos, jewelry, markings, etc.).
-
-4. Environment and Background Details:
-   - Interior or exterior setting.
-   - Architecture, furniture, natural elements, objects.
-   - Small visible details that stand out.
-
-5. Color and Lighting:
-   - Dominant colors.
-   - Contrast level.
-   - Type of lighting (natural, studio, neon, cinematic, etc.).
-   - Direction of light.
-   - Shadows and reflections.
-
-6. Textures and Materials:
-   - Skin, fabric, metal, glass, wood, etc.
-   - Level of surface detail (pores, brush strokes, grain, noise, gloss, etc.).
-
-7. Style and Technical Characteristics:
-   - Artistic style.
-   - Realism vs stylization.
-   - Signs of AI generation or post-processing (if noticeable).
-   - Approximate image quality and resolution impression.
-
-8. Additional Observations:
-   - Visual emphasis or focal points.
-   - Symbolism or narrative hints (only if clearly implied).
-   - Any unusual or notable elements.
-
-Write in an informative, precise manner without unnecessary artistic embellishment.
-Limit the response to approximately 400-600 words."""
 
 def normalize_facts(text: str) -> str:
     lines = []
@@ -1547,6 +1620,10 @@ def confirm_model_delete(model_name):
     )
 
 print("--- Building Gradio UI ---")
+vlm_preset_choices = vlm_preset_manager.keys()
+default_vlm_preset = settings_manager.get("vlm_preset", "Fast")
+if default_vlm_preset not in vlm_preset_choices:
+    default_vlm_preset = vlm_preset_choices[0] if vlm_preset_choices else "Fast"
 
 with gr.Blocks() as demo:
     
@@ -1563,6 +1640,9 @@ with gr.Blocks() as demo:
             with gr.Row():
                 with gr.Column(scale=1):
                     input_text = gr.TextArea(label="User Description", placeholder="Deep detailed scene description...", lines=10)
+                    with gr.Row():
+                        copy_description_btn = gr.Button("Copy description")
+                        clear_description_btn = gr.Button("Clear")
                     mode_sel = gr.Dropdown(choices=pipeline_preset_manager.keys(), label="Pipeline Preset", value="Default")
                     compile_btn = gr.Button("🚀 Compile prompt", variant="primary")
                     with gr.Accordion("Get PNG info", open=False):
@@ -1583,10 +1663,10 @@ with gr.Blocks() as demo:
                             value=vision_model_choices[0],
                             allow_custom_value=False
                         )
-                        desc_detail_mode = gr.Radio(
+                        desc_detail_mode = gr.Dropdown(
                             label="Description mode",
-                            choices=["Fast", "Detailed", "Ultra Detail"],
-                            value="Fast"
+                            choices=VLM_PRESET_CHOICES,
+                            value=default_vlm_preset
                         )
                         desc_btn = gr.Button("Get description", variant="primary")
                         desc_status = gr.Markdown("")
@@ -1599,7 +1679,7 @@ with gr.Blocks() as demo:
                     
 
 
-        with gr.Tab("⚙️ Pipeline Settings"):
+        with gr.Tab("⚙️ Pipeline Presets"):
             gr.Markdown("### Configure models for each stage")
             current_presets = template_manager.keys()
             
@@ -1607,7 +1687,7 @@ with gr.Blocks() as demo:
             with gr.Row() as pipeline_preset_select_row:
                 pipeline_preset = gr.Dropdown(choices=pipeline_preset_manager.keys(), label="Pipeline Presets", value="Default", scale=3)
                 with gr.Column(scale=1):
-                    add_pipeline_preset_btn = gr.Button("вћ• Add New Preset")
+                    add_pipeline_preset_btn = gr.Button("➕ Add New Preset")
                     delete_pipeline_preset_btn = gr.Button("🗑️ Delete Preset", variant="stop")
 
             # Add New Pipeline Preset UI
@@ -1644,28 +1724,43 @@ with gr.Blocks() as demo:
             
             # pipeline_status removed
 
-        with gr.Tab("⚙️ Pipeline Models"):
-            gr.Markdown("### Define Pipeline Models")
+        with gr.Tab("⚙️ Pipeline Roles"):
+            gr.Markdown("### Define Pipeline Roles")
             
             with gr.Row() as preset_select_row:
                 role_preset = gr.Dropdown(choices=template_manager.keys(), label="Role Preset", value="translator", allow_custom_value=True, scale=3)
                 with gr.Column(scale=1):
-                    add_preset_btn = gr.Button("вћ• Add New Preset")
-                    delete_preset_btn = gr.Button("🗑️ Delete Preset", variant="stop")
+                    add_preset_btn = gr.Button("➕ Add New Role")
+                    delete_preset_btn = gr.Button("🗑️ Delete Role", variant="stop")
             
             with gr.Row(visible=False) as delete_confirm_row:
-                gr.Markdown("Are you sure you want to delete this preset?")
+                gr.Markdown("Are you sure you want to delete this role?")
                 confirm_delete_btn = gr.Button("✅ Yes, Delete", variant="stop")
                 cancel_delete_btn = gr.Button("❌ Cancel")
 
             with gr.Row(visible=False) as new_preset_row:
-                new_preset_name = gr.Textbox(label="New Preset Name", placeholder="e.g., reviewer", scale=3)
+                new_preset_name = gr.Textbox(label="New Role Name", placeholder="e.g., reviewer", scale=3)
                 with gr.Column(scale=1):
                     save_new_preset_btn = gr.Button("✅ Confirm Add")
                     cancel_add_btn = gr.Button("❌ Cancel")
                 
             template_content = gr.TextArea(label="System Template", lines=10, value=template_manager.get("translator"))
             save_template_btn = gr.Button("Save role preset", variant="primary", scale=1, min_width=90)
+
+        with gr.Tab("👁️ VLM Presets"):
+            gr.Markdown("### Define Ollama instructions for image description")
+            vlm_preset_sel = gr.Dropdown(
+                choices=VLM_PRESET_CHOICES,
+                label="VLM Preset",
+                value=default_vlm_preset,
+                allow_custom_value=False
+            )
+            vlm_instruction = gr.TextArea(
+                label="Instruction",
+                lines=16,
+                value=vlm_preset_manager.get(default_vlm_preset)
+            )
+            save_vlm_preset_btn = gr.Button("💾 Save VLM Preset", variant="primary")
 
         with gr.Tab("🦙 Ollama models"):
 
@@ -1763,19 +1858,14 @@ with gr.Blocks() as demo:
         is_detailed = mode.startswith("detailed")
         context_limit = 700 if is_ultra else (420 if is_detailed else 220)
         sentence_limit = 12 if is_ultra else (8 if is_detailed else 4)
-        if is_ultra:
-            prompt = ULTRA_DETAIL_PROMPT
-        elif user_context:
+        preset_key = detail_mode if detail_mode in VLM_PRESET_CHOICES else "Fast"
+        prompt = (vlm_preset_manager.get(preset_key) or "").strip()
+        if not prompt:
+            prompt = DEFAULT_VLM_PRESETS.get(preset_key, DEFAULT_VLM_PRESETS["Fast"])
+        if user_context:
             if len(user_context) > context_limit:
                 user_context = user_context[:context_limit]
-            prompt = (
-                "Describe only visible content in this image for image generation. "
-                + f"Keep it concise (up to {sentence_limit} sentences). "
-                + 
-                f"Optional user context: {user_context}"
-            )
-        else:
-            prompt = f"Describe only visible content in this image for image generation in up to {sentence_limit} concise sentences."
+            prompt = f"{prompt}\n\nOptional user context: {user_context}"
         try:
             for partial_text, status in ollama_describe_image_stream(model, image_path, prompt, detail_mode):
                 if partial_text is None:
@@ -1803,6 +1893,36 @@ with gr.Blocks() as demo:
         inputs=[desc_image, input_text, desc_model_sel, desc_detail_mode],
         outputs=[input_text, desc_status]
     )
+
+    def on_vlm_preset_change(name):
+        preset = name if name in VLM_PRESET_CHOICES else "Fast"
+        settings_manager.set("vlm_preset", preset)
+        return vlm_preset_manager.get(preset)
+
+    vlm_preset_sel.change(
+        on_vlm_preset_change,
+        vlm_preset_sel,
+        [vlm_instruction]
+    )
+
+    def on_desc_mode_change(name):
+        preset = name if name in VLM_PRESET_CHOICES else "Fast"
+        settings_manager.set("vlm_preset", preset)
+        return gr.update(value=preset), vlm_preset_manager.get(preset)
+
+    desc_detail_mode.change(
+        on_desc_mode_change,
+        desc_detail_mode,
+        [vlm_preset_sel, vlm_instruction]
+    )
+
+    def save_vlm_preset(name, content):
+        preset = name if name in VLM_PRESET_CHOICES else "Fast"
+        vlm_preset_manager.set(preset, (content or "").strip())
+        settings_manager.set("vlm_preset", preset)
+        gr.Info(f"VLM Preset '{preset}' saved!")
+
+    save_vlm_preset_btn.click(save_vlm_preset, [vlm_preset_sel, vlm_instruction], None)
     
     def save_theme(theme_name):
         settings_manager.set("ui_theme", theme_name)
@@ -1999,6 +2119,17 @@ with gr.Blocks() as demo:
         outputs=None,
         js="(x) => { navigator.clipboard.writeText(x); }"
     )
+    def notify_description_copied(_):
+        gr.Info("Description copied to clipboard")
+        return None
+
+    copy_description_btn.click(
+        fn=notify_description_copied,
+        inputs=input_text,
+        outputs=None,
+        js="(x) => { navigator.clipboard.writeText(x || ''); }"
+    )
+    clear_description_btn.click(lambda: "", None, [input_text])
     clear_btn.click(lambda: ["", ""], None, [input_text, final_out])
 
 if __name__ == "__main__":

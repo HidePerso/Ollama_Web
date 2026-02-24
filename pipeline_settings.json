@@ -3,5 +3,6 @@
   "extractorModel": "qwen3-extractor:latest",
   "structurerModel": "qwen3-structurer:latest",
   "validatorModel": "qwen3-validator:latest",
-  "ui_theme": "Glass"
+  "ui_theme": "Glass",
+  "vlm_preset": "Ultra detail NSFW"
 }
