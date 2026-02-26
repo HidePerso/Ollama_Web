@@ -387,38 +387,41 @@ def extract_png_metadata(image_path: str) -> dict:
         "params": {},
         "error": None,
     }
-    try:
-        from PIL import Image
-    except Exception as e:
-        result["error"] = f"Pillow import error: {e}"
-        return result
 
-    try:
-        with Image.open(image_path) as img:
-            if not hasattr(img, "info") or not img.info:
-                result["error"] = "No metadata found in image"
-                return result
-
-            raw_prompt = img.info.get("prompt")
-            if not raw_prompt:
-                result["error"] = "No ComfyUI prompt metadata found"
-                return result
-
-            try:
-                prompt_data = json.loads(raw_prompt)
-            except json.JSONDecodeError:
-                result["error"] = "Could not parse prompt metadata"
-                return result
-
-            for _, node_data in prompt_data.items():
-                if not isinstance(node_data, dict):
+    def _to_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            for enc in ("utf-8", "utf-16", "utf-16le", "latin-1"):
+                try:
+                    return value.decode(enc, errors="ignore").strip("\x00")
+                except Exception:
                     continue
-                inputs = node_data.get("inputs", {})
-                class_type = node_data.get("class_type", "")
+            return ""
+        return str(value)
 
-                if "text" in inputs and isinstance(inputs["text"], str):
-                    if len(inputs["text"]) > len(result["prompt_text"]):
-                        result["prompt_text"] = inputs["text"]
+    def _fill_from_comfy_prompt(raw_prompt: str) -> bool:
+        try:
+            prompt_data = json.loads(raw_prompt)
+        except json.JSONDecodeError:
+            return False
+
+        if not isinstance(prompt_data, dict):
+            return False
+
+        found = False
+        for _, node_data in prompt_data.items():
+            if not isinstance(node_data, dict):
+                continue
+            inputs = node_data.get("inputs", {})
+            class_type = str(node_data.get("class_type", ""))
+
+            if isinstance(inputs, dict):
+                for text_key in ("text", "prompt", "positive", "positive_prompt", "clip_l", "t5xxl"):
+                    text_val = inputs.get(text_key)
+                    if isinstance(text_val, str) and len(text_val) > len(result["prompt_text"]):
+                        result["prompt_text"] = text_val
+                        found = True
 
                 if "KSampler" in class_type or "sampler" in class_type.lower():
                     if "seed" in inputs:
@@ -431,13 +434,120 @@ def extract_png_metadata(image_path: str) -> dict:
                         result["params"]["sampler"] = inputs["sampler_name"]
                     if "scheduler" in inputs:
                         result["params"]["scheduler"] = inputs["scheduler"]
-
                 if "width" in inputs and "height" in inputs:
                     result["params"]["width"] = inputs["width"]
                     result["params"]["height"] = inputs["height"]
 
+        return found or bool(result["params"])
+
+    def _fill_from_a1111_parameters(raw_text: str) -> bool:
+        text = (raw_text or "").strip()
+        if not text:
+            return False
+
+        found = False
+        parts = [p.strip() for p in text.split("\nNegative prompt:", 1)]
+        if parts and parts[0]:
+            if len(parts[0]) > len(result["prompt_text"]):
+                result["prompt_text"] = parts[0]
+            found = True
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        kv_line = ""
+        if lines:
+            last_line = lines[-1]
+            if "," in last_line and ":" in last_line:
+                kv_line = last_line
+            if len(lines) >= 2 and lines[-2].lower().startswith("negative prompt:"):
+                kv_line = lines[-1]
+        if not kv_line and ":" in text and "," in text:
+            kv_line = text.splitlines()[-1]
+
+        if kv_line:
+            for chunk in [c.strip() for c in kv_line.split(",") if c.strip()]:
+                if ":" not in chunk:
+                    continue
+                key, val = [p.strip() for p in chunk.split(":", 1)]
+                key_l = key.lower()
+                if key_l == "steps":
+                    result["params"]["steps"] = val
+                    found = True
+                elif key_l in ("cfg scale", "cfg"):
+                    result["params"]["cfg"] = val
+                    found = True
+                elif key_l == "sampler":
+                    result["params"]["sampler"] = val
+                    found = True
+                elif key_l == "scheduler":
+                    result["params"]["scheduler"] = val
+                    found = True
+                elif key_l == "seed":
+                    result["params"]["seed"] = val
+                    found = True
+                elif key_l == "size" and "x" in val.lower():
+                    dims = [d.strip() for d in re.split(r"[xX]", val, maxsplit=1)]
+                    if len(dims) == 2:
+                        result["params"]["width"] = dims[0]
+                        result["params"]["height"] = dims[1]
+                        found = True
+        return found
+
+    try:
+        from PIL import Image
+    except Exception as e:
+        result["error"] = f"Pillow import error: {e}"
+        return result
+
+    try:
+        with Image.open(image_path) as img:
+            if not hasattr(img, "info") or not img.info:
+                result["error"] = "No metadata found in image"
+                return result
+
+            text_meta = {str(k): _to_text(v) for k, v in img.info.items() if _to_text(v)}
+
+            parsed_any = False
+            raw_prompt = text_meta.get("prompt")
+            if raw_prompt:
+                parsed_any = _fill_from_comfy_prompt(raw_prompt) or parsed_any
+
+            for key in ("parameters", "comment", "Comment", "Description", "description", "UserComment"):
+                raw_val = text_meta.get(key, "")
+                if not raw_val:
+                    continue
+                parsed_any = _fill_from_comfy_prompt(raw_val) or parsed_any
+                parsed_any = _fill_from_a1111_parameters(raw_val) or parsed_any
+                if result["prompt_text"] and result["params"]:
+                    break
+
+            if hasattr(img, "getexif"):
+                try:
+                    exif = img.getexif()
+                except Exception:
+                    exif = None
+                if exif:
+                    for tag_id in (0x9286, 0x010E):  # UserComment, ImageDescription
+                        if tag_id not in exif:
+                            continue
+                        raw_exif = _to_text(exif.get(tag_id))
+                        if not raw_exif:
+                            continue
+                        parsed_any = _fill_from_comfy_prompt(raw_exif) or parsed_any
+                        parsed_any = _fill_from_a1111_parameters(raw_exif) or parsed_any
+
             if not result["prompt_text"]:
-                result["error"] = "Prompt text not found in metadata"
+                for key in ("prompt", "Prompt", "Description", "description"):
+                    val = (text_meta.get(key) or "").strip()
+                    if val and not val.startswith("{"):
+                        result["prompt_text"] = val
+                        parsed_any = True
+                        break
+
+            if not result["prompt_text"] and not result["params"]:
+                if parsed_any:
+                    result["error"] = "Prompt text not found in metadata"
+                else:
+                    result["error"] = "No supported prompt metadata found"
 
     except Exception as e:
         result["error"] = f"Error reading image: {str(e)}"
