@@ -384,6 +384,7 @@ def parse_list_output(output):
 def extract_png_metadata(image_path: str) -> dict:
     result = {
         "prompt_text": "",
+        "negative_prompt": "",
         "params": {},
         "error": None,
     }
@@ -392,13 +393,93 @@ def extract_png_metadata(image_path: str) -> dict:
         if value is None:
             return ""
         if isinstance(value, bytes):
+            raw = value
+            # EXIF UserComment often starts with an 8-byte charset prefix:
+            # ASCII\x00\x00\x00 / UNICODE\x00 / JIS\x00...
+            if len(raw) >= 8:
+                head = raw[:8]
+                if head.startswith(b"ASCII\x00\x00\x00") or head.startswith(b"UNICODE\x00") or head.startswith(b"JIS\x00\x00\x00\x00\x00"):
+                    raw = raw[8:]
             for enc in ("utf-8", "utf-16", "utf-16le", "latin-1"):
                 try:
-                    return value.decode(enc, errors="ignore").strip("\x00")
+                    return raw.decode(enc, errors="ignore").strip("\x00")
                 except Exception:
                     continue
             return ""
-        return str(value)
+        text = str(value)
+        # Some tools save EXIF comments as text starting with ASCII marker.
+        if text.startswith("ASCII\x00\x00\x00"):
+            text = text[8:]
+        return text
+
+    def _fill_from_generic_json(data: Any) -> bool:
+        found = False
+
+        def _set_if_longer(key: str, value: Any):
+            nonlocal found
+            if not isinstance(value, str):
+                return
+            val = value.strip()
+            if not val:
+                return
+            if len(val) > len(result[key]):
+                result[key] = val
+                found = True
+
+        if isinstance(data, dict):
+            _set_if_longer("prompt_text", data.get("prompt"))
+            _set_if_longer("prompt_text", data.get("positive"))
+            _set_if_longer("prompt_text", data.get("positive_prompt"))
+            _set_if_longer("negative_prompt", data.get("negative"))
+            _set_if_longer("negative_prompt", data.get("negative_prompt"))
+
+            key_map = {
+                "steps": "steps",
+                "cfg": "cfg",
+                "cfg_scale": "cfg",
+                "sampler": "sampler",
+                "sampler_name": "sampler",
+                "scheduler": "scheduler",
+                "seed": "seed",
+                "width": "width",
+                "height": "height",
+                "model": "model",
+                "model_hash": "model_hash",
+                "clip_skip": "clip_skip",
+                "denoise": "denoise",
+                "denoising_strength": "denoise",
+                "vae": "vae",
+                "vae_hash": "vae_hash",
+                "version": "version",
+            }
+            for src_key, dst_key in key_map.items():
+                if src_key in data and data.get(src_key) not in (None, ""):
+                    result["params"][dst_key] = data.get(src_key)
+                    found = True
+
+            hashes_obj = data.get("hashes")
+            if isinstance(hashes_obj, dict) and hashes_obj:
+                chunks = []
+                for k, v in hashes_obj.items():
+                    ktxt = str(k).strip()
+                    vtxt = str(v).strip()
+                    if not vtxt:
+                        continue
+                    chunks.append(f"{ktxt}: {vtxt}" if ktxt else vtxt)
+                if chunks:
+                    result["params"]["hashes"] = ", ".join(chunks)
+                    found = True
+
+            for v in data.values():
+                if isinstance(v, (dict, list)):
+                    found = _fill_from_generic_json(v) or found
+
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, (dict, list)):
+                    found = _fill_from_generic_json(item) or found
+
+        return found
 
     def _fill_from_comfy_prompt(raw_prompt: str) -> bool:
         try:
@@ -407,7 +488,7 @@ def extract_png_metadata(image_path: str) -> dict:
             return False
 
         if not isinstance(prompt_data, dict):
-            return False
+            return _fill_from_generic_json(prompt_data)
 
         found = False
         for _, node_data in prompt_data.items():
@@ -421,6 +502,11 @@ def extract_png_metadata(image_path: str) -> dict:
                     text_val = inputs.get(text_key)
                     if isinstance(text_val, str) and len(text_val) > len(result["prompt_text"]):
                         result["prompt_text"] = text_val
+                        found = True
+                for text_key in ("negative", "negative_prompt", "uc"):
+                    text_val = inputs.get(text_key)
+                    if isinstance(text_val, str) and len(text_val) > len(result["negative_prompt"]):
+                        result["negative_prompt"] = text_val
                         found = True
 
                 if "KSampler" in class_type or "sampler" in class_type.lower():
@@ -437,7 +523,17 @@ def extract_png_metadata(image_path: str) -> dict:
                 if "width" in inputs and "height" in inputs:
                     result["params"]["width"] = inputs["width"]
                     result["params"]["height"] = inputs["height"]
+                if "VAELoader" in class_type and "vae_name" in inputs:
+                    result["params"]["vae"] = inputs["vae_name"]
+                if "CheckpointLoader" in class_type and "ckpt_name" in inputs:
+                    result["params"]["model"] = inputs["ckpt_name"]
+                if "UNETLoader" in class_type and "unet_name" in inputs:
+                    result["params"]["model"] = inputs["unet_name"]
+                if "ModelSamplingSD3" in class_type and "model" in inputs and not result["params"].get("model"):
+                    result["params"]["model"] = inputs["model"]
 
+        if not found and not result["params"]:
+            return _fill_from_generic_json(prompt_data)
         return found or bool(result["params"])
 
     def _fill_from_a1111_parameters(raw_text: str) -> bool:
@@ -446,13 +542,34 @@ def extract_png_metadata(image_path: str) -> dict:
             return False
 
         found = False
-        parts = [p.strip() for p in text.split("\nNegative prompt:", 1)]
+        parts = [p.strip() for p in re.split(r"\nNegative prompt:", text, maxsplit=1, flags=re.IGNORECASE)]
         if parts and parts[0]:
             if len(parts[0]) > len(result["prompt_text"]):
                 result["prompt_text"] = parts[0]
             found = True
 
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        lines_raw = [line.rstrip() for line in text.splitlines()]
+        lines = [line.strip() for line in lines_raw if line.strip()]
+        for idx, raw_line in enumerate(lines_raw):
+            line = raw_line.strip()
+            if not line.lower().startswith("negative prompt:"):
+                continue
+            neg = line.split(":", 1)[1].strip() if ":" in line else ""
+            extra_lines = []
+            for next_line in lines_raw[idx + 1:]:
+                next_clean = next_line.strip()
+                if not next_clean:
+                    continue
+                if re.search(r"\bsteps\s*:", next_clean, flags=re.IGNORECASE) and "," in next_clean:
+                    break
+                extra_lines.append(next_clean)
+            if extra_lines:
+                neg = "\n".join(([neg] if neg else []) + extra_lines)
+            if neg and len(neg) > len(result["negative_prompt"]):
+                result["negative_prompt"] = neg
+                found = True
+            break
+
         kv_line = ""
         if lines:
             last_line = lines[-1]
@@ -483,6 +600,54 @@ def extract_png_metadata(image_path: str) -> dict:
                     found = True
                 elif key_l == "seed":
                     result["params"]["seed"] = val
+                    found = True
+                elif key_l == "model":
+                    result["params"]["model"] = val
+                    found = True
+                elif key_l == "model hash":
+                    result["params"]["model_hash"] = val
+                    found = True
+                elif key_l == "clip skip":
+                    result["params"]["clip_skip"] = val
+                    found = True
+                elif key_l == "denoising strength":
+                    result["params"]["denoise"] = val
+                    found = True
+                elif key_l == "vae":
+                    result["params"]["vae"] = val
+                    found = True
+                elif key_l == "vae hash":
+                    result["params"]["vae_hash"] = val
+                    found = True
+                elif key_l == "hashes":
+                    result["params"]["hashes"] = val
+                    found = True
+                elif key_l == "ensd":
+                    result["params"]["ensd"] = val
+                    found = True
+                elif key_l == "version":
+                    result["params"]["version"] = val
+                    found = True
+                elif key_l == "face restoration":
+                    result["params"]["face_restoration"] = val
+                    found = True
+                elif key_l == "postprocess upscaler":
+                    result["params"]["postprocess_upscaler"] = val
+                    found = True
+                elif key_l == "postprocess upscale by":
+                    result["params"]["postprocess_upscale_by"] = val
+                    found = True
+                elif key_l == "hires upscale":
+                    result["params"]["hires_upscale"] = val
+                    found = True
+                elif key_l == "hires upscaler":
+                    result["params"]["hires_upscaler"] = val
+                    found = True
+                elif key_l == "hires steps":
+                    result["params"]["hires_steps"] = val
+                    found = True
+                elif key_l == "rng":
+                    result["params"]["rng"] = val
                     found = True
                 elif key_l == "size" and "x" in val.lower():
                     dims = [d.strip() for d in re.split(r"[xX]", val, maxsplit=1)]
@@ -562,6 +727,8 @@ def format_metadata_display(metadata: dict) -> str:
     lines = []
     if metadata.get("prompt_text"):
         lines.append(f"📝 Prompt:\n{metadata['prompt_text']}\n")
+    if metadata.get("negative_prompt"):
+        lines.append(f"🚫 Negative prompt:\n{metadata['negative_prompt']}\n")
 
     params = metadata.get("params", {})
     if params:
@@ -582,6 +749,134 @@ def format_metadata_display(metadata: dict) -> str:
     if not lines:
         return "No generation parameters found in metadata"
     return "\n".join(lines)
+
+def build_civitai_parameters_text(metadata: dict) -> str:
+    prompt_text = (metadata.get("prompt_text") or "").strip()
+    negative_prompt = (metadata.get("negative_prompt") or "").strip()
+    params = metadata.get("params", {}) or {}
+
+    lines = []
+    if prompt_text:
+        lines.append(prompt_text)
+    # Keep explicit negative-prompt line for maximum A1111/Civitai compatibility.
+    lines.append(f"Negative prompt: {negative_prompt}")
+
+    kv_parts = []
+
+    def add_pair(label: str, value: Any):
+        if value is None:
+            return
+        value_text = str(value).strip()
+        if not value_text:
+            return
+        kv_parts.append(f"{label}: {value_text}")
+
+    add_pair("Steps", params.get("steps"))
+    add_pair("Sampler", params.get("sampler"))
+    add_pair("Scheduler", params.get("scheduler"))
+    add_pair("CFG scale", params.get("cfg"))
+    add_pair("Seed", params.get("seed"))
+    if params.get("width") and params.get("height"):
+        kv_parts.append(f"Size: {params['width']}x{params['height']}")
+    add_pair("Model", params.get("model"))
+    add_pair("Model hash", params.get("model_hash"))
+    add_pair("Clip skip", params.get("clip_skip"))
+    add_pair("Denoising strength", params.get("denoise"))
+    add_pair("VAE", params.get("vae"))
+    add_pair("VAE hash", params.get("vae_hash"))
+    add_pair("Hashes", params.get("hashes"))
+    add_pair("ENSD", params.get("ensd"))
+    add_pair("Face restoration", params.get("face_restoration"))
+    add_pair("Postprocess upscaler", params.get("postprocess_upscaler"))
+    add_pair("Postprocess upscale by", params.get("postprocess_upscale_by"))
+    add_pair("Hires upscaler", params.get("hires_upscaler"))
+    add_pair("Hires steps", params.get("hires_steps"))
+    add_pair("Hires upscale", params.get("hires_upscale"))
+    add_pair("RNG", params.get("rng"))
+    add_pair("Version", params.get("version"))
+
+    if kv_parts:
+        lines.append(", ".join(kv_parts))
+    return "\n".join(lines).strip()
+
+def rewrite_png_metadata_for_civitai(image_path: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"success": False, "error": None, "metadata": None}
+    if not image_path:
+        out["error"] = "Please upload a PNG image first."
+        return out
+
+    try:
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+    except Exception as e:
+        out["error"] = f"Pillow import error: {e}"
+        return out
+
+    try:
+        metadata = extract_png_metadata(image_path)
+        prompt_text = (metadata.get("prompt_text") or "").strip()
+
+        with Image.open(image_path) as img:
+            if str(img.format).upper() != "PNG":
+                out["error"] = "Only PNG images are supported."
+                return out
+
+            # Ensure canonical Civitai fields are present even if source metadata is partial.
+            params = metadata.get("params", {}) or {}
+            if not params.get("width") or not params.get("height"):
+                params["width"], params["height"] = img.size
+                metadata["params"] = params
+
+            civitai_parameters = build_civitai_parameters_text(metadata)
+            if not civitai_parameters:
+                out["error"] = "Cannot build Civitai metadata from this image."
+                return out
+
+            source_info = dict(getattr(img, "info", {}) or {})
+            pnginfo = PngInfo()
+
+            def _to_text(value: Any) -> str:
+                if value is None:
+                    return ""
+                if isinstance(value, bytes):
+                    for enc in ("utf-8", "utf-16", "utf-16le", "latin-1"):
+                        try:
+                            return value.decode(enc, errors="ignore").strip("\x00")
+                        except Exception:
+                            continue
+                    return ""
+                return str(value)
+
+            for key, value in source_info.items():
+                key_text = str(key)
+                if key_text.lower() in {"parameters", "comment", "description"}:
+                    continue
+                text_value = _to_text(value).strip()
+                if not text_value:
+                    continue
+                pnginfo.add_text(key_text, text_value)
+
+            # Keep A1111/Civitai-compatible primary field and add common fallbacks
+            # used by metadata editors that parse generic comment/description tags.
+            pnginfo.add_text("parameters", civitai_parameters)
+            pnginfo.add_text("Comment", civitai_parameters)
+            if prompt_text:
+                pnginfo.add_text("Description", prompt_text)
+
+            save_kwargs: Dict[str, Any] = {"pnginfo": pnginfo}
+            for preserve_key in ("icc_profile", "exif", "dpi", "gamma", "transparency"):
+                if preserve_key in source_info:
+                    save_kwargs[preserve_key] = source_info[preserve_key]
+
+            img.save(image_path, format="PNG", **save_kwargs)
+
+        refreshed = extract_png_metadata(image_path)
+        out["success"] = True
+        out["metadata"] = refreshed
+        return out
+    except Exception as e:
+        out["error"] = f"Failed to rewrite metadata: {e}"
+        return out
 
 
 def get_model_capabilities(model_name: str) -> set:
@@ -1080,6 +1375,12 @@ CSS = """
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.84rem;
   line-height: 1.45;
+}
+.fix-meta-btn button {
+  min-height: 28px !important;
+  height: 28px !important;
+  padding: 0 10px !important;
+  font-size: 0.8rem !important;
 }
 
 """
@@ -1763,6 +2064,13 @@ with gr.Blocks() as demo:
                             lines=8,
                             interactive=False
                         )
+                        with gr.Row():
+                            fix_meta_btn = gr.Button(
+                                "Fix meta",
+                                variant="secondary",
+                                min_width=90,
+                                elem_classes=["fix-meta-btn"]
+                            )
                     with gr.Accordion("Create description from image", open=False):
                         gr.Markdown("*Upload image and click Get description*")
                         desc_image = gr.Image(label="Image", type="filepath", height=220)
@@ -1936,8 +2244,29 @@ with gr.Blocks() as demo:
             return display, prompt_text
         return display, gr.update()
 
+    def on_fix_meta_click(image_path):
+        result = rewrite_png_metadata_for_civitai(image_path)
+        if not result.get("success"):
+            err_msg = result.get('error') or 'Unable to update metadata'
+            gr.Warning(f"Fix meta failed: {err_msg}")
+            return f"⚠️ {err_msg}", gr.update()
+
+        metadata = result.get("metadata") or extract_png_metadata(image_path)
+        display = format_metadata_display(metadata)
+        gr.Info("Fix meta completed successfully.")
+        out_text = f"✅ Civitai metadata updated.\n\n{display}"
+        prompt_text = (metadata.get("prompt_text") or "").strip()
+        if prompt_text:
+            return out_text, prompt_text
+        return out_text, gr.update()
+
     png_meta_image.change(
         fn=on_png_info_image_change,
+        inputs=[png_meta_image],
+        outputs=[png_meta_output, input_text]
+    )
+    fix_meta_btn.click(
+        fn=on_fix_meta_click,
         inputs=[png_meta_image],
         outputs=[png_meta_output, input_text]
     )
